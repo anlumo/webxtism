@@ -1,0 +1,12 @@
+[tasks.kernel]
+script_runner = "@shell"
+script = '''
+cargo install wasm-tools
+git clone https://github.com/extism/extism.git --depth 1
+cd extism/kernel
+
+./build.sh
+cd ../..
+cp extism/runtime/src/extism-runtime.wasm .
+rm -rf extism
+'''

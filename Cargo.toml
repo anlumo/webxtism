@@ -1,0 +1,14 @@
+[package]
+name = "webxtism"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dashmap = "6.1.0"
+extism-convert = "1.8.0"
+extism-manifest = "1.8.0"
+futures-util = "0.3.31"
+reqwest = "0.12.9"
+thiserror = "1.0.67"
+tracing = "0.1.40"
+wasmer = "5.0.0"
