@@ -13,13 +13,12 @@ thread_local! {
     static THREAD_LOCAL_MAP: std::cell::RefCell<std::collections::HashMap<usize, wasmer::Instance>> = std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-static GLOBAL_MAP: std::sync::LazyLock<dashmap::DashMap<usize, wasmer::Instance>> =
-    std::sync::LazyLock::new(Default::default);
-
 pub struct Kernel {
+    #[allow(unused)]
     id: usize,
     context: Weak<Context>,
+    #[cfg(not(target_arch = "wasm32"))]
+    runtime: wasmer::Instance,
 }
 
 impl Kernel {
@@ -38,15 +37,22 @@ impl Kernel {
         .unwrap();
 
         #[cfg(target_arch = "wasm32")]
-        THREAD_LOCAL_MAP.with(|map| {
-            map.borrow_mut().insert(id, runtime);
-        });
+        {
+            THREAD_LOCAL_MAP.with(|map| {
+                map.borrow_mut().insert(id, runtime);
+            });
+            Self {
+                id,
+                context: Arc::downgrade(context),
+            }
+        }
         #[cfg(not(target_arch = "wasm32"))]
-        GLOBAL_MAP.insert(id, runtime);
-
-        Self {
-            id,
-            context: Arc::downgrade(context),
+        {
+            Self {
+                id,
+                context: Arc::downgrade(context),
+                runtime,
+            }
         }
     }
 
@@ -54,7 +60,7 @@ impl Kernel {
         self.context.upgrade().ok_or(ContextGoneError::ContextGone)
     }
 
-    // WARNING: only works on the thread that created this kernel.
+    // WARNING: On wasm32, this only works on the thread that created this kernel.
     // On other threads, `f` will not be called and None is returned.
     fn with_runtime<R>(&self, f: impl FnOnce(&wasmer::Instance) -> R) -> Option<R> {
         #[cfg(target_arch = "wasm32")]
@@ -63,7 +69,7 @@ impl Kernel {
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            GLOBAL_MAP.get(&self.id).map(|runtime| f(&runtime))
+            Some(f(&self.runtime))
         }
     }
 
@@ -558,18 +564,12 @@ impl Kernel {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
 impl Drop for Kernel {
     fn drop(&mut self) {
-        #[cfg(target_arch = "wasm32")]
-        {
-            THREAD_LOCAL_MAP.with(|map| {
-                map.borrow_mut().remove(&self.id);
-            });
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            GLOBAL_MAP.remove(&self.id);
-        }
+        THREAD_LOCAL_MAP.with(|map| {
+            map.borrow_mut().remove(&self.id);
+        });
     }
 }
 

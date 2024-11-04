@@ -32,10 +32,6 @@ thread_local! {
     static THREAD_LOCAL_MAP: std::cell::RefCell<std::collections::HashMap<usize, BTreeMap<String, Instance>>> = std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-static GLOBAL_MAP: std::sync::LazyLock<DashMap<usize, BTreeMap<String, Instance>>> =
-    std::sync::LazyLock::new(Default::default);
-
 fn new_plugin_id() -> usize {
     PLUGIN_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
@@ -47,6 +43,8 @@ pub struct Plugin<ID> {
     modules: BTreeMap<String, Module>,
     metadata: Arc<PluginMetadata<ID>>,
     pub kernel: Arc<Kernel>,
+    #[cfg(not(target_arch = "wasm32"))]
+    instances: BTreeMap<String, Instance>,
 }
 
 impl<ID: PluginIdentifier> Plugin<ID> {
@@ -117,19 +115,25 @@ impl<ID: PluginIdentifier> Plugin<ID> {
             THREAD_LOCAL_MAP.with(|map| {
                 map.borrow_mut().insert(plugin_id, instances);
             });
+            Ok(Self {
+                id: plugin_id,
+                context: Arc::downgrade(context),
+                modules,
+                metadata,
+                kernel,
+            })
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            GLOBAL_MAP.insert(plugin_id, instances);
+            Ok(Self {
+                id: plugin_id,
+                context: Arc::downgrade(context),
+                modules,
+                metadata,
+                kernel,
+                instances,
+            })
         }
-
-        Ok(Self {
-            id: plugin_id,
-            context: Arc::downgrade(context),
-            modules,
-            metadata,
-            kernel,
-        })
     }
 
     pub fn context(&self) -> Result<Arc<Context>, ContextGoneError> {
@@ -140,6 +144,7 @@ impl<ID: PluginIdentifier> Plugin<ID> {
             .clone())
     }
 
+    // WARNING: On wasm32, this only works on the thread that created this plugin.
     fn with_instances<R>(
         &self,
         f: impl FnOnce(&BTreeMap<String, Instance>) -> R,
@@ -156,10 +161,7 @@ impl<ID: PluginIdentifier> Plugin<ID> {
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let Some(instances) = GLOBAL_MAP.get(&self.id) else {
-                return Err(PluginRunError::ContextGone);
-            };
-            Ok(f(&instances))
+            Ok(f(&self.instances))
         }
     }
 
@@ -624,18 +626,12 @@ impl<ID: PluginIdentifier> Plugin<ID> {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
 impl<ID> Drop for Plugin<ID> {
     fn drop(&mut self) {
-        #[cfg(target_arch = "wasm32")]
-        {
-            THREAD_LOCAL_MAP.with(|map| {
-                map.borrow_mut().remove(&self.id);
-            });
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            GLOBAL_MAP.remove(&self.id);
-        }
+        THREAD_LOCAL_MAP.with(|map| {
+            map.borrow_mut().remove(&self.id);
+        });
     }
 }
 
