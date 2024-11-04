@@ -29,7 +29,7 @@ async fn main() {
             .await
             .unwrap();
 
-    let context = Arc::new(webxtism::Context::default());
+    let context = Arc::default();
 
     let plugin = Plugin::new(&context, "count_vowels", count_vowels_plugin.as_ref(), [])
         .await
