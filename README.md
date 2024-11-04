@@ -43,7 +43,7 @@ Add the following to your `Cargo.toml`:
 webxtism = "0.1.0"
 ```
 
-TODO: right now, the extism kernel isn't built this way. This has to be fixed before this crate can be used as an external dependency!
+Note that the extism kernel is loaded from github in build.rs, meaning that it needs Internet access during the build!
 
 ## Usage
 
