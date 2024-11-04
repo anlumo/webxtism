@@ -2,7 +2,7 @@ use std::sync::RwLock;
 
 use wasmer::{Module, Store};
 
-const RUNTIME: &[u8] = include_bytes!("../extism-runtime.wasm");
+const RUNTIME: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/extism-runtime.wasm"));
 
 pub struct Context {
     pub(crate) store: RwLock<Store>,

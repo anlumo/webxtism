@@ -12,7 +12,7 @@ extism-convert = "1.8.0"
 extism-manifest = "1.8.0"
 futures-util = "0.3.31"
 reqwest = "0.12.9"
-thiserror = "1.0.67"
+thiserror = "1.0.68"
 tracing = "0.1.40"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
@@ -23,3 +23,6 @@ wasmer = "5.0.0"
 wasmer = { version = "5.0.0", default-features = false, features = [
     "js-default",
 ] }
+
+[build-dependencies]
+reqwest = { version = "0.12.9", features = ["blocking"] }
