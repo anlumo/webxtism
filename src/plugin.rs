@@ -9,7 +9,7 @@ use extism_convert::{FromBytesOwned, ToBytes};
 use extism_manifest::{Manifest, Wasm};
 use reqwest::{header::HeaderValue, Method};
 use thiserror::Error;
-use tracing::{event, Level};
+use tracing::Level;
 use wasmer::{
     CompileError, ExportError, Extern, ExternType, Function, FunctionEnv, Imports, Instance,
     InstantiationError, Memory, Module, RuntimeError,
@@ -99,9 +99,10 @@ impl<ID: PluginIdentifier> Plugin<ID> {
             )
             .collect();
         let mut instances = BTreeMap::new();
-        for module in modules.values() {
+        for (name, module) in modules.iter() {
             Self::instantiate_module(
                 context,
+                name,
                 module,
                 &mut instances,
                 &modules,
@@ -168,16 +169,17 @@ impl<ID: PluginIdentifier> Plugin<ID> {
     #[allow(clippy::result_large_err)]
     fn instantiate_module(
         context: &Context,
+        name: &str,
         module: &Module,
         loaded: &mut BTreeMap<String, Instance>,
         all_modules: &BTreeMap<String, Module>,
         external_imports: &BTreeMap<(String, String), Extern>,
         dependency_tree: &[&str],
     ) -> Result<(), PluginInstantiationError> {
-        if loaded.contains_key(module.name().unwrap()) {
+        if loaded.contains_key(name) {
             return Ok(());
         }
-        if dependency_tree.contains(&module.name().unwrap()) {
+        if dependency_tree.contains(&name) {
             return Err(PluginInstantiationError::CyclicDependency);
         }
 
@@ -217,10 +219,11 @@ impl<ID: PluginIdentifier> Plugin<ID> {
                 if !loaded.contains_key(dependency_name) {
                     if let Some(dependency) = all_modules.get(dependency_name) {
                         let mut tree = dependency_tree.to_vec();
-                        tree.push(module.name().unwrap());
+                        tree.push(name);
 
                         Self::instantiate_module(
                             context,
+                            dependency_name,
                             dependency,
                             loaded,
                             all_modules,
@@ -255,7 +258,7 @@ impl<ID: PluginIdentifier> Plugin<ID> {
         let mut store = context.store.write().unwrap();
         let instance = Instance::new(&mut store, module, &imports)?;
 
-        loaded.insert(module.name().unwrap().to_owned(), instance);
+        loaded.insert(name.to_owned(), instance);
 
         Ok(())
     }
@@ -273,18 +276,17 @@ impl<ID: PluginIdentifier> Plugin<ID> {
                             let data = tokio::fs::read(path).await?;
                             let store = context.store.read().unwrap();
                             let mut module = Module::new(&store, data)?;
-                            if let Some(name) = &meta.name {
+                            let name = if let Some(name) = &meta.name {
                                 module.set_name(name);
-                            } else if module.name().is_none() {
+                                name.as_str()
+                            } else if let Some(name) = module.name() {
+                                name
+                            } else {
                                 module.set_name(DEFAULT_MODULE_NAME);
-                            }
-                            Ok::<_, PluginLoadError>((
-                                meta.name
-                                    .as_ref()
-                                    .cloned()
-                                    .unwrap_or_else(|| DEFAULT_MODULE_NAME.to_owned()),
-                                module,
-                            ))
+                                DEFAULT_MODULE_NAME
+                            };
+
+                            Ok::<_, PluginLoadError>((name.to_owned(), module))
                         }
                         #[cfg(target_arch = "wasm32")]
                         {
@@ -295,28 +297,16 @@ impl<ID: PluginIdentifier> Plugin<ID> {
                     Wasm::Data { data, meta } => {
                         let store = context.store.read().unwrap();
                         let mut module = Module::new(&store, data)?;
-                        event!(
-                            Level::DEBUG,
-                            "Module name from metadata: {:?}, from wasm: {:?}",
-                            meta.name,
-                            module.name()
-                        );
-                        if let Some(name) = &meta.name {
-                            let success = module.set_name(name);
-                            event!(
-                                Level::DEBUG,
-                                "module name set to {name:?} success = {success:?}"
-                            );
-                        } else if module.name().is_none() {
+                        let name = if let Some(name) = &meta.name {
+                            module.set_name(name);
+                            name.as_str()
+                        } else if let Some(name) = module.name() {
+                            name
+                        } else {
                             module.set_name(DEFAULT_MODULE_NAME);
-                        }
-                        Ok((
-                            meta.name
-                                .as_ref()
-                                .cloned()
-                                .unwrap_or_else(|| DEFAULT_MODULE_NAME.to_owned()),
-                            module,
-                        ))
+                            DEFAULT_MODULE_NAME
+                        };
+                        Ok((name.to_owned(), module))
                     }
                     Wasm::Url { req, meta } => {
                         let client = reqwest::Client::new();
@@ -340,18 +330,16 @@ impl<ID: PluginIdentifier> Plugin<ID> {
 
                         let store = context.store.read().unwrap();
                         let mut module = Module::new(&store, data)?;
-                        if let Some(name) = &meta.name {
+                        let name = if let Some(name) = &meta.name {
                             module.set_name(name);
-                        } else if module.name().is_none() {
+                            name.as_str()
+                        } else if let Some(name) = module.name() {
+                            name
+                        } else {
                             module.set_name(DEFAULT_MODULE_NAME);
-                        }
-                        Ok((
-                            meta.name
-                                .as_ref()
-                                .cloned()
-                                .unwrap_or_else(|| DEFAULT_MODULE_NAME.to_owned()),
-                            module,
-                        ))
+                            DEFAULT_MODULE_NAME
+                        };
+                        Ok((name.to_owned(), module))
                     }
                 }
             }))
@@ -391,8 +379,6 @@ impl<ID: PluginIdentifier> Plugin<ID> {
 
             let err_handle = {
                 let mut store = context.store.write().unwrap();
-                let function = instance.exports.get_function(name)?;
-                tracing::event!(Level::DEBUG, "function type = {:?}", function.ty(&store));
 
                 instance
                     .exports
