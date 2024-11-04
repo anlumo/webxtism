@@ -10,7 +10,13 @@ This crate is highly experimental and not ready for any kind of production use!
 - **Plugin System**: Easily load and manage extism plugins from various sources such as files, data, or URLs.
 - **Logging**: Integrated logging support for debugging and information tracking using the [tracing crate](https://github.com/tokio-rs/tracing).
 
-Web support is still pending!
+## Web Support
+
+Native (Windows/macOS/Linux/iOS/Android) and Web support using the same codebase is a major goal of this implementation. However, there is a caveat:
+
+Web has some restrictions when it comes to threading. Rust nightly for wasm32-unknown-unknown has had support for native threads for a long time (when certain compile flags are enabled and cross origin isolation is activated), but JsValues cannot be shared (they don't implement Send or Sync). Transfer is possible using the Web API, but that has to be done manually and explicitly.
+
+So, wasmer's `Instance` does not implement Send or Sync on the wasm32 target. This results in this project only supporting plugin function calls on the thread the plugin was created on. It was implemented in the way that calls on the wrong thread simply fail with an error, rather than being caught by the compiler (`Plugin` still implements Send and Sync). This limitation is caused by wasmer requiring all wasm function imports to implement Send and Sync even on Web, thus making it impossible to check this at compile time.
 
 ## Installation
 
