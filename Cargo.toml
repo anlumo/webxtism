@@ -3,6 +3,9 @@ name = "webxtism"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+crate-type = ["cdylib"]
+
 [dependencies]
 dashmap = "6.1.0"
 extism-convert = "1.8.0"
@@ -11,4 +14,12 @@ futures-util = "0.3.31"
 reqwest = "0.12.9"
 thiserror = "1.0.67"
 tracing = "0.1.40"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { version = "1.41.0", features = ["fs"] }
 wasmer = "5.0.0"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasmer = { version = "5.0.0", default-features = false, features = [
+    "js-default",
+] }
