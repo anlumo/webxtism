@@ -4,7 +4,10 @@ use extism_convert::{FromBytesOwned, ToBytes};
 use thiserror::Error;
 use wasmer::{Extern, Function, FunctionEnv, FunctionEnvMut};
 
-use crate::{Context, PluginIdentifier};
+use crate::{
+    plugin::{kernel::KernelError, ContextGoneError},
+    Plugin, PluginIdentifier,
+};
 
 #[derive(Debug)]
 pub struct HostExport {
@@ -15,26 +18,27 @@ pub struct HostExport {
 
 impl HostExport {
     pub fn new_with_in_out<'o, IN, OUT, ENV, ID: PluginIdentifier>(
-        context: &Arc<Context<ID>>,
+        plugin: &Arc<Plugin<ID>>,
         namespace: Option<&str>,
         name: &str,
         f: impl Fn(&ENV, IN) -> Result<OUT, ()> + Send + Sync + 'static,
         env: ENV,
-    ) -> Self
+    ) -> Result<Self, ContextGoneError>
     where
         IN: FromBytesOwned,
         OUT: ToBytes<'o>,
         ENV: Send + 'static,
     {
+        let context = plugin.context()?;
         let mut store = context.store.write().unwrap();
-        let function_env = FunctionEnv::new(&mut store, (Arc::downgrade(context), env));
+        let function_env = FunctionEnv::new(&mut store, (Arc::downgrade(plugin), env));
         let wasmer_extern = Extern::Function(Function::new_typed_with_env(
             &mut store,
             &function_env,
-            move |env: FunctionEnvMut<'_, (Weak<Context<ID>>, ENV)>, input: i64| {
-                let (context, env) = env.data();
-                if let Some(context) = context.upgrade() {
-                    let input = match Self::fetch_in(&context, input) {
+            move |env: FunctionEnvMut<'_, (Weak<Plugin<ID>>, ENV)>, input: i64| {
+                let (plugin, env) = env.data();
+                if let Some(plugin) = plugin.upgrade() {
+                    let input = match Self::fetch_in(&plugin, input) {
                         Ok(input) => input,
                         Err(err) => {
                             tracing::error!("{err}");
@@ -42,7 +46,7 @@ impl HostExport {
                         }
                     };
                     if let Ok(output) = f(env, input) {
-                        Self::store_out(&context, output).unwrap_or_else(|err| {
+                        Self::store_out(&plugin, output).unwrap_or_else(|err| {
                             tracing::error!("{err}");
                             0
                         })
@@ -55,33 +59,34 @@ impl HostExport {
                 }
             },
         ));
-        Self {
+        Ok(Self {
             name: name.to_string(),
             namespace: namespace.map(|s| s.to_string()),
             wasmer_extern,
-        }
+        })
     }
 
     pub fn new_with_in<IN, ENV, ID: PluginIdentifier>(
-        context: &Arc<Context<ID>>,
+        plugin: &Arc<Plugin<ID>>,
         namespace: Option<&str>,
         name: &str,
         f: impl Fn(&ENV, IN) + Send + Sync + 'static,
         env: ENV,
-    ) -> Self
+    ) -> Result<Self, ContextGoneError>
     where
         IN: FromBytesOwned,
         ENV: Send + 'static,
     {
+        let context = plugin.context()?;
         let mut store = context.store.write().unwrap();
-        let function_env = FunctionEnv::new(&mut store, (Arc::downgrade(context), env));
+        let function_env = FunctionEnv::new(&mut store, (Arc::downgrade(plugin), env));
         let wasmer_extern = Extern::Function(Function::new_typed_with_env(
             &mut store,
             &function_env,
-            move |env: FunctionEnvMut<'_, (Weak<Context<ID>>, ENV)>, input: i64| {
-                let (context, env) = env.data();
-                if let Some(context) = context.upgrade() {
-                    let input = match Self::fetch_in(&context, input) {
+            move |env: FunctionEnvMut<'_, (Weak<Plugin<ID>>, ENV)>, input: i64| {
+                let (plugin, env) = env.data();
+                if let Some(plugin) = plugin.upgrade() {
+                    let input = match Self::fetch_in(&plugin, input) {
                         Ok(input) => input,
                         Err(err) => {
                             tracing::error!("{err}");
@@ -92,37 +97,38 @@ impl HostExport {
                 }
             },
         ));
-        Self {
+        Ok(Self {
             name: name.to_string(),
             namespace: namespace.map(|s| s.to_string()),
             wasmer_extern,
-        }
+        })
     }
 
     pub fn new_with_out<'o, OUT, ENV, ID: PluginIdentifier>(
-        context: &Arc<Context<ID>>,
+        plugin: &Arc<Plugin<ID>>,
         namespace: Option<&str>,
         name: &str,
         f: impl Fn(&ENV) -> Result<OUT, ()> + Send + Sync + 'static,
         env: ENV,
-    ) -> Self
+    ) -> Result<Self, ContextGoneError>
     where
         OUT: ToBytes<'o>,
         ENV: Send + 'static,
     {
+        let context = plugin.context()?;
         let mut store = context.store.write().unwrap();
-        let function_env = FunctionEnv::new(&mut store, (Arc::downgrade(context), env));
+        let function_env = FunctionEnv::new(&mut store, (Arc::downgrade(plugin), env));
         let wasmer_extern = Extern::Function(Function::new_typed_with_env(
             &mut store,
             &function_env,
-            move |env: FunctionEnvMut<'_, (Weak<Context<ID>>, ENV)>| {
-                let (context, env) = env.data();
-                if let Some(context) = context.upgrade() {
+            move |env: FunctionEnvMut<'_, (Weak<Plugin<ID>>, ENV)>| {
+                let (plugin, env) = env.data();
+                if let Some(plugin) = plugin.upgrade() {
                     let Ok(output) = f(env) else {
                         tracing::warn!("Host function error");
                         return 0;
                     };
-                    Self::store_out(&context, output).unwrap_or_else(|err| {
+                    Self::store_out(&plugin, output).unwrap_or_else(|err| {
                         tracing::error!("{err}");
                         0
                     })
@@ -131,23 +137,24 @@ impl HostExport {
                 }
             },
         ));
-        Self {
+        Ok(Self {
             name: name.to_string(),
             namespace: namespace.map(|s| s.to_string()),
             wasmer_extern,
-        }
+        })
     }
 
     pub fn new<ENV, ID: PluginIdentifier>(
-        context: &Arc<Context<ID>>,
+        plugin: &Arc<Plugin<ID>>,
         namespace: Option<&str>,
         name: &str,
         f: impl Fn(&ENV) + Send + Sync + 'static,
         env: ENV,
-    ) -> Self
+    ) -> Result<Self, ContextGoneError>
     where
         ENV: Send + 'static,
     {
+        let context = plugin.context()?;
         let mut store = context.store.write().unwrap();
         let function_env = FunctionEnv::new(&mut store, env);
         let wasmer_extern = Extern::Function(Function::new_typed_with_env(
@@ -157,30 +164,31 @@ impl HostExport {
                 f(env.data());
             },
         ));
-        Self {
+        Ok(Self {
             name: name.to_string(),
             namespace: namespace.map(|s| s.to_string()),
             wasmer_extern,
-        }
+        })
     }
 
     fn fetch_in<IN: FromBytesOwned, ID: PluginIdentifier>(
-        context: &Arc<Context<ID>>,
+        plugin: &Plugin<ID>,
         input: i64,
     ) -> Result<IN, FetchInError> {
-        let handle = context
+        let handle = plugin
+            .kernel
             .memory_handle(input as u64)
             .ok_or(FetchInError::HandleNotFound(input))?;
-        let input_message: IN = context.memory_get(handle)?;
-        context.memory_free(handle)?;
+        let input_message: IN = plugin.kernel.memory_get(handle)?;
+        plugin.kernel.memory_free(handle)?;
         Ok(input_message)
     }
 
     fn store_out<'o, OUT: ToBytes<'o>, ID: PluginIdentifier>(
-        context: &Arc<Context<ID>>,
+        plugin: &Plugin<ID>,
         output: OUT,
     ) -> Result<i64, StoreOutError> {
-        Ok(context.memory_new(output)?.offset as i64)
+        Ok(plugin.kernel.memory_new(output)?.offset as i64)
     }
 
     pub fn namespace(&self) -> &str {
@@ -196,12 +204,12 @@ enum FetchInError {
     HandleNotFound(i64),
     #[error("Convert: {0}")]
     Access(#[from] extism_convert::Error),
-    #[error("Runtime: {0}")]
-    Runtime(#[from] wasmer::RuntimeError),
+    #[error("Kernel: {0}")]
+    Runtime(#[from] KernelError),
 }
 
 #[derive(Debug, Error)]
 enum StoreOutError {
-    #[error("Memory allocation: {0}")]
-    Memory(#[from] crate::context::ContextError),
+    #[error("Kernel: {0}")]
+    Memory(#[from] KernelError),
 }

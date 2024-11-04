@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     str::FromStr,
-    sync::{Arc, Weak},
+    sync::{atomic::AtomicUsize, Arc, Weak},
 };
 
 use dashmap::DashMap;
@@ -11,32 +11,54 @@ use reqwest::{header::HeaderValue, Method};
 use thiserror::Error;
 use tracing::{event, Level};
 use wasmer::{
-    CompileError, ExportError, Extern, ExternType, Imports, Instance, InstantiationError, Memory,
-    Module, RuntimeError,
+    CompileError, ExportError, Extern, ExternType, Function, FunctionEnv, Imports, Instance,
+    InstantiationError, Memory, Module, RuntimeError,
 };
 
+pub mod kernel;
+
 use crate::{Context, WasmInput, EXTISM_ENV_MODULE};
+use kernel::Kernel;
 
 pub trait PluginIdentifier: AsRef<str> + Send + Sync + 'static {}
 impl<T> PluginIdentifier for T where T: AsRef<str> + Send + Sync + 'static {}
 
 const DEFAULT_MODULE_NAME: &str = "main";
 
+static PLUGIN_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static THREAD_LOCAL_MAP: std::cell::RefCell<std::collections::HashMap<usize, BTreeMap<String, Instance>>> = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+static GLOBAL_MAP: std::sync::LazyLock<DashMap<usize, BTreeMap<String, Instance>>> =
+    std::sync::LazyLock::new(Default::default);
+
+fn new_plugin_id() -> usize {
+    PLUGIN_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 #[allow(unused)]
-pub struct Plugin<ID: PluginIdentifier> {
-    context: Weak<Context<ID>>,
+pub struct Plugin<ID> {
+    id: usize,
+    context: Weak<Context>,
     modules: BTreeMap<String, Module>,
-    instances: BTreeMap<String, Instance>,
     metadata: Arc<PluginMetadata<ID>>,
+    pub kernel: Arc<Kernel>,
 }
 
 impl<ID: PluginIdentifier> Plugin<ID> {
     pub async fn new<'a>(
-        context: &Arc<Context<ID>>,
+        context: &Arc<Context>,
         id: ID,
         input: impl Into<WasmInput<'a>>,
         imports: impl IntoIterator<Item = crate::HostExport>,
     ) -> Result<Self, PluginLoadError> {
+        let plugin_id = new_plugin_id();
+        let kernel = Arc::new(Kernel::new(context, plugin_id));
+
         let (modules, metadata) = match input.into() {
             WasmInput::Data(data) => {
                 let store = context.store.read().unwrap();
@@ -73,8 +95,7 @@ impl<ID: PluginIdentifier> Plugin<ID> {
             .into_iter()
             .map(|e| ((e.namespace().to_owned(), e.name), e.wasmer_extern))
             .chain(
-                context
-                    .host_env(metadata.clone())
+                Self::host_env(context, &kernel, metadata.clone())
                     .into_iter()
                     .map(|(name, external)| ((EXTISM_ENV_MODULE.to_owned(), name), external)),
             )
@@ -91,17 +112,60 @@ impl<ID: PluginIdentifier> Plugin<ID> {
             )?;
         }
 
-        Ok(Plugin {
+        #[cfg(target_arch = "wasm32")]
+        {
+            THREAD_LOCAL_MAP.with(|map| {
+                map.borrow_mut().insert(plugin_id, instances);
+            });
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            GLOBAL_MAP.insert(plugin_id, instances);
+        }
+
+        Ok(Self {
+            id: plugin_id,
             context: Arc::downgrade(context),
             modules,
             metadata,
-            instances,
+            kernel,
         })
+    }
+
+    pub fn context(&self) -> Result<Arc<Context>, ContextGoneError> {
+        Ok(self
+            .context
+            .upgrade()
+            .ok_or(ContextGoneError::ContextGone)?
+            .clone())
+    }
+
+    fn with_instances<R>(
+        &self,
+        f: impl FnOnce(&BTreeMap<String, Instance>) -> R,
+    ) -> Result<R, PluginRunError> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            THREAD_LOCAL_MAP.with(|map| {
+                let plugins = map.borrow();
+                let Some(instances) = plugins.get(&self.id) else {
+                    return Err(PluginRunError::ContextGone);
+                };
+                Ok(f(instances))
+            })
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let Some(instances) = GLOBAL_MAP.get(&self.id) else {
+                return Err(PluginRunError::ContextGone);
+            };
+            Ok(f(&instances))
+        }
     }
 
     #[allow(clippy::result_large_err)]
     fn instantiate_module(
-        context: &Context<ID>,
+        context: &Context,
         module: &Module,
         loaded: &mut BTreeMap<String, Instance>,
         all_modules: &BTreeMap<String, Module>,
@@ -195,7 +259,7 @@ impl<ID: PluginIdentifier> Plugin<ID> {
     }
 
     async fn load_manifest(
-        context: &Arc<Context<ID>>,
+        context: &Arc<Context>,
         manifest: &Manifest,
     ) -> Result<BTreeMap<String, Module>, PluginLoadError> {
         let tuples =
@@ -294,6 +358,8 @@ impl<ID: PluginIdentifier> Plugin<ID> {
         Ok(tuples.into_iter().collect())
     }
 
+    /// MARK: Call functions
+
     pub fn call_in_out<'i, IN: ToBytes<'i>, OUT: FromBytesOwned>(
         &self,
         name: &str,
@@ -303,42 +369,45 @@ impl<ID: PluginIdentifier> Plugin<ID> {
             return Err(PluginRunError::ContextGone);
         };
 
-        let handle = context.memory_new(arg)?;
-        if let Err(err) = context.set_input(handle) {
-            if context.memory_free(handle).is_err() {
+        let handle = self.kernel.memory_new(arg)?;
+        if let Err(err) = self.kernel.set_input(handle) {
+            if self.kernel.memory_free(handle).is_err() {
                 tracing::error!("Failed to free memory {}", handle.offset);
             }
             return Err(err.into());
         }
 
-        let Some(instance) = self.instances.get(DEFAULT_MODULE_NAME) else {
-            tracing::event!(
-                Level::ERROR,
-                "No main module: {:?}",
-                self.instances.keys().collect::<Vec<_>>()
-            );
-            return Err(PluginRunError::NoMainModule);
-        };
+        let err_handle = self.with_instances(|instances| {
+            let Some(instance) = instances.get(DEFAULT_MODULE_NAME) else {
+                tracing::event!(
+                    Level::ERROR,
+                    "No main module: {:?}",
+                    instances.keys().collect::<Vec<_>>()
+                );
+                return Err(PluginRunError::NoMainModule);
+            };
 
-        let err_handle = {
-            let mut store = context.store.write().unwrap();
-            let function = instance.exports.get_function(name)?;
-            tracing::event!(Level::DEBUG, "function type = {:?}", function.ty(&store));
+            let err_handle = {
+                let mut store = context.store.write().unwrap();
+                let function = instance.exports.get_function(name)?;
+                tracing::event!(Level::DEBUG, "function type = {:?}", function.ty(&store));
 
-            instance
-                .exports
-                .get_typed_function::<(), i32>(&store, name)?
-                .call(&mut store)?
-        };
+                instance
+                    .exports
+                    .get_typed_function::<(), i32>(&store, name)?
+                    .call(&mut store)?
+            };
+            Ok(err_handle)
+        })??;
 
         if err_handle != 0 {
             todo!()
         }
 
-        let output_handle = context.get_output()?;
-        let output: OUT = context.memory_get(output_handle)?;
+        let output_handle = self.kernel.get_output()?;
+        let output: OUT = self.kernel.memory_get(output_handle)?;
 
-        if context.memory_free(output_handle).is_err() {
+        if self.kernel.memory_free(output_handle).is_err() {
             tracing::error!("Failed to free memory {}", output_handle.offset);
         }
 
@@ -351,23 +420,27 @@ impl<ID: PluginIdentifier> Plugin<ID> {
         };
 
         let mut store = context.store.write().unwrap();
-        let handle = context.memory_new(arg)?;
+        let handle = self.kernel.memory_new(arg)?;
 
-        let Some(instance) = self.instances.get(DEFAULT_MODULE_NAME) else {
-            tracing::event!(
-                Level::ERROR,
-                "No main module: {:?}",
-                self.instances.keys().collect::<Vec<_>>()
-            );
-            return Err(PluginRunError::NoMainModule);
-        };
+        let err_handle = self.with_instances(|instances| {
+            let Some(instance) = instances.get(DEFAULT_MODULE_NAME) else {
+                tracing::event!(
+                    Level::ERROR,
+                    "No main module: {:?}",
+                    instances.keys().collect::<Vec<_>>()
+                );
+                return Err(PluginRunError::NoMainModule);
+            };
 
-        context.set_input(handle)?;
+            self.kernel.set_input(handle)?;
 
-        let err_handle = instance
-            .exports
-            .get_typed_function::<(), i32>(&store, name)?
-            .call(&mut store)?;
+            let err_handle = instance
+                .exports
+                .get_typed_function::<(), i32>(&store, name)?
+                .call(&mut store)?;
+
+            Ok(err_handle)
+        })??;
 
         if err_handle != 0 {
             todo!()
@@ -382,27 +455,31 @@ impl<ID: PluginIdentifier> Plugin<ID> {
         };
 
         let mut store = context.store.write().unwrap();
-        let Some(instance) = self.instances.get(DEFAULT_MODULE_NAME) else {
-            tracing::event!(
-                Level::ERROR,
-                "No main module: {:?}",
-                self.instances.keys().collect::<Vec<_>>()
-            );
-            return Err(PluginRunError::NoMainModule);
-        };
-        let err_handle = instance
-            .exports
-            .get_typed_function::<(), i32>(&store, name)?
-            .call(&mut store)?;
+        let err_handle = self.with_instances(|instances| {
+            let Some(instance) = instances.get(DEFAULT_MODULE_NAME) else {
+                tracing::event!(
+                    Level::ERROR,
+                    "No main module: {:?}",
+                    instances.keys().collect::<Vec<_>>()
+                );
+                return Err(PluginRunError::NoMainModule);
+            };
+            let err_handle = instance
+                .exports
+                .get_typed_function::<(), i32>(&store, name)?
+                .call(&mut store)?;
+
+            Ok(err_handle)
+        })??;
 
         if err_handle != 0 {
             todo!()
         }
 
-        let output_handle = context.get_output()?;
-        let output: OUT = context.memory_get(output_handle)?;
+        let output_handle = self.kernel.get_output()?;
+        let output: OUT = self.kernel.memory_get(output_handle)?;
 
-        if context.memory_free(output_handle).is_err() {
+        if self.kernel.memory_free(output_handle).is_err() {
             tracing::error!("Failed to free memory {}", output_handle.offset);
         }
 
@@ -415,19 +492,150 @@ impl<ID: PluginIdentifier> Plugin<ID> {
         };
 
         let mut store = context.store.write().unwrap();
-        let Some(instance) = self.instances.get(DEFAULT_MODULE_NAME) else {
-            return Err(PluginRunError::NoMainModule);
-        };
-        let err_handle = instance
-            .exports
-            .get_typed_function::<(), i32>(&store, name)?
-            .call(&mut store)?;
+        let err_handle = self.with_instances(|instances| {
+            let Some(instance) = instances.get(DEFAULT_MODULE_NAME) else {
+                return Err(PluginRunError::NoMainModule);
+            };
+            let err_handle = instance
+                .exports
+                .get_typed_function::<(), i32>(&store, name)?
+                .call(&mut store)?;
+
+            Ok(err_handle)
+        })??;
 
         if err_handle != 0 {
             todo!()
         }
 
         Ok(())
+    }
+
+    /// MARK: Runtime
+
+    pub(crate) fn host_env(
+        context: &Arc<Context>,
+        kernel: &Arc<Kernel>,
+        metadata: Arc<PluginMetadata<ID>>,
+    ) -> BTreeMap<String, Extern> {
+        let mut store = context.store.write().unwrap();
+
+        let function_env = FunctionEnv::new(&mut store, (kernel.clone(), metadata));
+
+        [
+            ("memory", Extern::Memory(kernel.memory().unwrap())),
+            (
+                "log_warn",
+                Extern::Function(Function::new_typed_with_env(
+                    &mut store,
+                    &function_env,
+                    Kernel::log_warn,
+                )),
+            ),
+            (
+                "log_info",
+                Extern::Function(Function::new_typed_with_env(
+                    &mut store,
+                    &function_env,
+                    Kernel::log_info,
+                )),
+            ),
+            (
+                "log_debug",
+                Extern::Function(Function::new_typed_with_env(
+                    &mut store,
+                    &function_env,
+                    Kernel::log_debug,
+                )),
+            ),
+            (
+                "log_error",
+                Extern::Function(Function::new_typed_with_env(
+                    &mut store,
+                    &function_env,
+                    Kernel::log_error,
+                )),
+            ),
+            (
+                "log_trace",
+                Extern::Function(Function::new_typed_with_env(
+                    &mut store,
+                    &function_env,
+                    Kernel::log_trace,
+                )),
+            ),
+            (
+                "get_log_level",
+                Extern::Function(Function::new_typed(&mut store, Kernel::get_log_level)),
+            ),
+            (
+                "config_get",
+                Extern::Function(Function::new_typed_with_env(
+                    &mut store,
+                    &function_env,
+                    Kernel::config_get,
+                )),
+            ),
+            (
+                "var_get",
+                Extern::Function(Function::new_typed_with_env(
+                    &mut store,
+                    &function_env,
+                    Kernel::var_get,
+                )),
+            ),
+            (
+                "var_set",
+                Extern::Function(Function::new_typed_with_env(
+                    &mut store,
+                    &function_env,
+                    Kernel::var_set,
+                )),
+            ),
+            (
+                "http_request",
+                Extern::Function(Function::new_typed_with_env(
+                    &mut store,
+                    &function_env,
+                    Kernel::http_request,
+                )),
+            ),
+            (
+                "http_status_code",
+                Extern::Function(Function::new_typed_with_env(
+                    &mut store,
+                    &function_env,
+                    Kernel::http_status_code,
+                )),
+            ),
+            (
+                "http_headers",
+                Extern::Function(Function::new_typed_with_env(
+                    &mut store,
+                    &function_env,
+                    Kernel::http_headers,
+                )),
+            ),
+        ]
+        .into_iter()
+        .map(|(name, ext)| (name.to_string(), ext))
+        .chain(kernel.exports())
+        .collect()
+    }
+}
+
+impl<ID> Drop for Plugin<ID> {
+    fn drop(&mut self) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            THREAD_LOCAL_MAP.with(|map| {
+                map.borrow_mut().remove(&self.id);
+            });
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            GLOBAL_MAP.remove(&self.id);
+        }
     }
 }
 
@@ -482,7 +690,7 @@ pub enum PluginInstantiationError {
 }
 
 #[derive(Debug, Clone)]
-pub struct PluginMetadata<ID: AsRef<str>> {
+pub struct PluginMetadata<ID> {
     pub id: ID,
     pub config: BTreeMap<String, String>,
     pub vars: DashMap<String, Vec<u8>>,
@@ -493,7 +701,7 @@ pub enum PluginRunError {
     #[error("Context gone")]
     ContextGone,
     #[error("Context: {0}")]
-    Context(#[from] crate::context::ContextError),
+    Context(#[from] kernel::KernelError),
     #[error("No main module")]
     NoMainModule,
     #[error("Export: {0}")]
@@ -504,4 +712,16 @@ pub enum PluginRunError {
     OutputHandleNotFound,
     #[error("Extism convert: {0}")]
     Extism(#[from] extism_convert::Error),
+}
+
+#[derive(Debug, Error)]
+pub enum ContextGoneError {
+    #[error("Context gone")]
+    ContextGone,
+}
+
+impl From<ContextGoneError> for PluginRunError {
+    fn from(_err: ContextGoneError) -> Self {
+        PluginRunError::ContextGone
+    }
 }

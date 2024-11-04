@@ -5,7 +5,10 @@ mod wasm_input;
 
 pub use context::Context;
 pub use function::HostExport;
-pub use plugin::{Plugin, PluginIdentifier};
+pub use plugin::{
+    kernel::{Kernel, KernelError},
+    Plugin, PluginIdentifier,
+};
 pub use wasm_input::WasmInput;
 
 pub use extism_convert;
