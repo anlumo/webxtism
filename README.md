@@ -4,6 +4,22 @@ WebXtism is a Rust library designed to provide a flexible and efficient runtime 
 
 This crate is highly experimental and not ready for any kind of production use!
 
+## Why
+
+Extism already provides a Rust implementation, so why another one?
+
+The official implementation uses wasmtime, while this one uses wasmer. Switching the runtime results in a different feature set:
+
+- **Cross-Platform Support**: Wasmer is designed to be a universal runtime that can run WebAssembly on various platforms, including desktop, server, embedded environments, and the Web.
+
+- **Singlepass Compiler**: Wasmer includes a Singlepass compiler that is optimized for use cases where fast compilation times are more critical than runtime performance, such as embedded systems. This is in addition to its Cranelift and LLVM compilers, offering flexibility in performance and compilation speed.
+
+- **Middleware System**: Wasmer supports a middleware system that allows developers to extend and customize the runtime. This feature is particularly useful for applications that require specific functionality or optimizations.
+
+- **WASI/WASIX Support**: While both Wasmer and Wasmtime support the WebAssembly System Interface (WASI), Wasmer extends the interface, which they call [WASIX](https://wasix.org/). It adds features like multithreading, sockets, and support for asynchronous runtimes (like tokio).
+
+- **Compilation**: Wasmer supports compiling WebAssembly modules to native code, which can then be serialized to disk and loaded directly. This is especially interesting for embedded, because it allows shipping without a compiler.
+
 ## Features
 
 - **Wasm Execution**: Run Wasm modules efficiently using Wasmer.
