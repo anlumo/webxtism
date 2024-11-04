@@ -1,10 +1,27 @@
 use std::borrow::Cow;
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::Path;
 
 use extism_manifest::Manifest;
 
 pub enum WasmInput<'a> {
     Data(Cow<'a, [u8]>),
     Manifest(Cow<'a, Manifest>),
+}
+
+impl WasmInput<'_> {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn file(path: impl AsRef<Path>) -> Self {
+        use extism_manifest::{Wasm, WasmMetadata};
+
+        Self::Manifest(Cow::Owned(Manifest {
+            wasm: vec![Wasm::File {
+                path: path.as_ref().to_path_buf(),
+                meta: WasmMetadata::default(),
+            }],
+            ..Default::default()
+        }))
+    }
 }
 
 impl<'a> From<&'a Manifest> for WasmInput<'a> {
