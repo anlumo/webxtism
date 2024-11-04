@@ -8,7 +8,7 @@ This crate is highly experimental and not ready for any kind of production use!
 
 Extism already provides a Rust implementation, so why another one?
 
-The official implementation uses wasmtime, while this one uses wasmer. Switching the runtime results in a different feature set:
+The official implementation uses Wasmtime, while this one uses Wasmer. Switching the runtime results in a different feature set:
 
 - **Cross-Platform Support**: Wasmer is designed to be a universal runtime that can run WebAssembly on various platforms, including desktop, server, embedded environments, and the Web.
 
