@@ -36,7 +36,7 @@ async fn main() {
         .unwrap();
 
     let result: Json<TestOutput> = plugin
-        .call_in_out("count_vowels", "hello woorld".to_owned())
+        .call_in_out(context.store(), "count_vowels", "hello woorld".to_owned())
         .unwrap();
 
     println!("{:?}", result.0);
