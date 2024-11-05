@@ -3,7 +3,7 @@ mod function;
 mod plugin;
 mod wasm_input;
 
-pub use context::Context;
+pub use context::{Context, ContextSettings};
 pub use function::{HostExportBuilder, HostExportBuilderWithFunction};
 pub use plugin::{
     kernel::{Kernel, KernelError},
