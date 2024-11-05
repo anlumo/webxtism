@@ -154,8 +154,8 @@ where
 }
 
 pub struct HostExportBuilder {
-    pub name: String,
-    pub namespace: Option<String>,
+    name: String,
+    namespace: Option<String>,
 }
 
 impl HostExportBuilder {
@@ -258,7 +258,7 @@ pub struct HostExportBuilderWithFunction<ID> {
 }
 
 impl<ID: PluginIdentifier> HostExportBuilderWithFunction<ID> {
-    pub fn get_namespace(&self) -> &str {
+    pub(crate) fn get_namespace(&self) -> &str {
         self.namespace
             .as_deref()
             .unwrap_or(crate::EXTISM_USER_MODULE)
