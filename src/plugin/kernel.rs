@@ -9,7 +9,7 @@ use wasmer::{
 
 use crate::{Context, EXTISM_ENV_MODULE};
 
-use super::{ContextGoneError, PluginIdentifier, PluginMetadata};
+use super::{PluginIdentifier, PluginMetadata};
 
 #[cfg(target_arch = "wasm32")]
 thread_local! {
@@ -72,7 +72,7 @@ impl Kernel {
                 .cloned()
                 .map_err(|err| err.into())
         })
-        .unwrap_or(Err(KernelError::ContextGone))
+        .unwrap_or(Err(KernelError::RuntimeNotFound))
     }
 
     pub(super) fn exports(&self) -> Vec<(String, wasmer::Extern)> {
@@ -94,7 +94,7 @@ impl Kernel {
                 .unwrap()
                 .call(&mut store, offs as i64)? as u64)
         })
-        .ok_or(KernelError::ContextGone)?
+        .ok_or(KernelError::RuntimeNotFound)?
     }
 
     /// Allocate a handle large enough for the encoded Rust type and copy it into Extism memory
@@ -117,7 +117,7 @@ impl Kernel {
 
             Ok(())
         })
-        .ok_or(KernelError::ContextGone)??;
+        .ok_or(KernelError::RuntimeNotFound)??;
 
         Ok(handle)
     }
@@ -142,7 +142,7 @@ impl Kernel {
                     .unwrap()
                     .call(&mut store, n as i64)? as u64)
             })
-            .ok_or(KernelError::ContextGone)??;
+            .ok_or(KernelError::RuntimeNotFound)??;
 
         if offs == 0 {
             return Err(KernelError::OutOfMemory);
@@ -185,7 +185,7 @@ impl Kernel {
                 .call(&mut store, handle.offset as i64)
                 .map_err(|e| e.into())
         })
-        .ok_or(KernelError::ContextGone)?
+        .ok_or(KernelError::RuntimeNotFound)?
     }
 
     pub fn memory_bytes(
@@ -198,7 +198,7 @@ impl Kernel {
             mem.copy_range_to_vec(handle.offset..(handle.length + handle.offset))
                 .map_err(|e| e.into())
         })
-        .ok_or(KernelError::ContextGone)?
+        .ok_or(KernelError::RuntimeNotFound)?
     }
 
     pub fn memory_get<T: FromBytesOwned>(
@@ -232,7 +232,7 @@ impl Kernel {
                 .call(&mut store, handle.offset as i64, handle.length as i64)
                 .map_err(|e| e.into())
         })
-        .ok_or(KernelError::ContextGone)?
+        .ok_or(KernelError::RuntimeNotFound)?
     }
 
     pub fn set_output(
@@ -248,7 +248,7 @@ impl Kernel {
                 .call(&mut store, handle.offset as i64, handle.length as i64)
                 .map_err(|e| e.into())
         })
-        .ok_or(KernelError::ContextGone)?
+        .ok_or(KernelError::RuntimeNotFound)?
     }
 
     pub fn get_output(&self, mut store: impl AsStoreMut) -> Result<MemoryHandle, KernelError> {
@@ -266,7 +266,7 @@ impl Kernel {
                     .call(&mut store)? as u64;
                 Ok((offset, length))
             })
-            .ok_or(KernelError::ContextGone)??;
+            .ok_or(KernelError::RuntimeNotFound)??;
         Ok(MemoryHandle { offset, length })
     }
 
@@ -285,7 +285,7 @@ impl Kernel {
                     .call(&mut store)? as u64;
                 Ok((offset, length))
             })
-            .ok_or(KernelError::ContextGone)??;
+            .ok_or(KernelError::RuntimeNotFound)??;
         Ok(MemoryHandle { offset, length })
     }
 
@@ -582,20 +582,12 @@ pub enum KernelError {
     Runtime(#[from] RuntimeError),
     #[error("Extism: {0}")]
     Extism(#[from] extism_convert::Error),
-    #[error("Context gone")]
-    ContextGone,
+    #[error("Runtime not found")]
+    RuntimeNotFound,
     #[error("UTF8 conversion failed: {0}")]
     FromUtf8Error(#[from] std::string::FromUtf8Error),
     #[error("Export: {0}")]
     Export(#[from] wasmer::ExportError),
-}
-
-impl From<ContextGoneError> for KernelError {
-    fn from(err: ContextGoneError) -> Self {
-        match err {
-            ContextGoneError::ContextGone => Self::ContextGone,
-        }
-    }
 }
 
 /// Convert log level to integer

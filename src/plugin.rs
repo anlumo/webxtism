@@ -141,12 +141,8 @@ impl<ID: PluginIdentifier> Plugin<ID> {
         Ok(instance)
     }
 
-    pub fn context(&self) -> Result<Arc<Context>, ContextGoneError> {
-        Ok(self
-            .context
-            .upgrade()
-            .ok_or(ContextGoneError::ContextGone)?
-            .clone())
+    pub fn context(&self) -> Option<Arc<Context>> {
+        self.context.upgrade().as_ref().cloned()
     }
 
     // WARNING: On wasm32, this only works on the thread that created this plugin.
@@ -685,10 +681,4 @@ pub enum PluginRunError {
     OutputHandleNotFound,
     #[error("Extism convert: {0}")]
     Extism(#[from] extism_convert::Error),
-}
-
-#[derive(Debug, Error)]
-pub enum ContextGoneError {
-    #[error("Context gone")]
-    ContextGone,
 }
