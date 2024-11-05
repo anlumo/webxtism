@@ -2,7 +2,7 @@ use std::sync::{Arc, Weak};
 
 use extism_convert::{FromBytesOwned, ToBytes};
 use thiserror::Error;
-use wasmer::{AsStoreMut, Extern, Function, FunctionEnv, FunctionEnvMut};
+use wasmer::{AsStoreMut, Extern, Function, FunctionEnv, FunctionEnvMut, StoreMut};
 
 use crate::{plugin::kernel::KernelError, Context, Plugin, PluginIdentifier};
 
@@ -13,19 +13,20 @@ trait ToExtern<ID: PluginIdentifier> {
 #[allow(clippy::type_complexity)]
 pub enum ExportDefinition<IN, OUT, ENV> {
     InOut {
-        function: Box<dyn Fn(&ENV, IN) -> Result<OUT, ()> + Send + Sync + 'static>,
+        function:
+            Box<dyn Fn(&mut StoreMut<'_>, &ENV, IN) -> Result<OUT, ()> + Send + Sync + 'static>,
         env: ENV,
     },
     In {
-        function: Box<dyn Fn(&ENV, IN) + Send + Sync + 'static>,
+        function: Box<dyn Fn(&mut StoreMut<'_>, &ENV, IN) + Send + Sync + 'static>,
         env: ENV,
     },
     Out {
-        function: Box<dyn Fn(&ENV) -> Result<OUT, ()> + Send + Sync + 'static>,
+        function: Box<dyn Fn(&mut StoreMut<'_>, &ENV) -> Result<OUT, ()> + Send + Sync + 'static>,
         env: ENV,
     },
     Bare {
-        function: Box<dyn Fn(&ENV) + Send + Sync + 'static>,
+        function: Box<dyn Fn(&mut StoreMut<'_>, &ENV) + Send + Sync + 'static>,
         env: ENV,
     },
 }
@@ -77,7 +78,7 @@ where
                                     return 0;
                                 }
                             };
-                            if let Ok(output) = function(env, input) {
+                            if let Ok(output) = function(&mut store, env, input) {
                                 store_out(store, &plugin, output).unwrap_or_else(|err| {
                                     tracing::error!("{err}");
                                     0
@@ -99,16 +100,16 @@ where
                     &mut store,
                     &function_env,
                     move |mut fenv: FunctionEnvMut<'_, (Weak<Plugin<ID>>, ENV)>, input: i64| {
-                        let ((plugin, env), store) = fenv.data_and_store_mut();
+                        let ((plugin, env), mut store) = fenv.data_and_store_mut();
                         if let Some(plugin) = plugin.upgrade() {
-                            let input = match fetch_in(store, &plugin, input) {
+                            let input = match fetch_in(&mut store, &plugin, input) {
                                 Ok(input) => input,
                                 Err(err) => {
                                     tracing::error!("{err}");
                                     return;
                                 }
                             };
-                            function(env, input);
+                            function(&mut store, env, input);
                         }
                     },
                 ))
@@ -119,10 +120,10 @@ where
                 Extern::Function(Function::new_typed_with_env(
                     &mut store,
                     &function_env,
-                    move |fenv: FunctionEnvMut<'_, (Weak<Plugin<ID>>, ENV)>| {
-                        let (plugin, env) = fenv.data();
+                    move |mut fenv: FunctionEnvMut<'_, (Weak<Plugin<ID>>, ENV)>| {
+                        let ((plugin, env), mut store) = fenv.data_and_store_mut();
                         if let Some(plugin) = plugin.upgrade() {
-                            let Ok(output) = function(env) else {
+                            let Ok(output) = function(&mut store, env) else {
                                 tracing::warn!("Host function error");
                                 return 0;
                             };
@@ -142,8 +143,9 @@ where
                 Extern::Function(Function::new_typed_with_env(
                     &mut store,
                     &function_env,
-                    move |env: FunctionEnvMut<'_, ENV>| {
-                        function(env.data());
+                    move |mut fenv: FunctionEnvMut<'_, ENV>| {
+                        let (env, mut store) = fenv.data_and_store_mut();
+                        function(&mut store, env);
                     },
                 ))
             }
@@ -170,7 +172,7 @@ impl HostExportBuilder {
 
     pub fn function_in_out<'o, IN, OUT, ENV, ID>(
         self,
-        f: impl Fn(&ENV, IN) -> Result<OUT, ()> + Send + Sync + 'static,
+        f: impl Fn(&mut StoreMut<'_>, &ENV, IN) -> Result<OUT, ()> + Send + Sync + 'static,
         env: ENV,
     ) -> HostExportBuilderWithFunction<ID>
     where
@@ -191,7 +193,7 @@ impl HostExportBuilder {
 
     pub fn function_in<IN, ENV, ID>(
         self,
-        f: impl Fn(&ENV, IN) + Send + Sync + 'static,
+        f: impl Fn(&mut StoreMut<'_>, &ENV, IN) + Send + Sync + 'static,
         env: ENV,
     ) -> HostExportBuilderWithFunction<ID>
     where
@@ -211,7 +213,7 @@ impl HostExportBuilder {
 
     pub fn function_out<'o, OUT, ENV, ID>(
         self,
-        f: impl Fn(&ENV) -> Result<OUT, ()> + Send + Sync + 'static,
+        f: impl Fn(&mut StoreMut<'_>, &ENV) -> Result<OUT, ()> + Send + Sync + 'static,
         env: ENV,
     ) -> HostExportBuilderWithFunction<ID>
     where
@@ -231,7 +233,7 @@ impl HostExportBuilder {
 
     pub fn function<ENV, ID>(
         self,
-        f: impl Fn(&ENV) + Send + Sync + 'static,
+        f: impl Fn(&mut StoreMut<'_>, &ENV) + Send + Sync + 'static,
         env: ENV,
     ) -> HostExportBuilderWithFunction<ID>
     where

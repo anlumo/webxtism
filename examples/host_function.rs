@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use extism_convert::{FromBytes, Json, ToBytes};
 use tracing::level_filters::LevelFilter;
+use wasmer::StoreMut;
 use webxtism::{HostExportBuilder, Plugin};
 
 #[allow(unused)]
@@ -11,7 +12,11 @@ struct TestOutput {
     pub count: i32,
 }
 
-fn hello_world(_env: &(), count: Json<TestOutput>) -> Result<Json<TestOutput>, ()> {
+fn hello_world(
+    _store: &mut StoreMut<'_>,
+    _env: &(),
+    count: Json<TestOutput>,
+) -> Result<Json<TestOutput>, ()> {
     tracing::info!("Host function called with {:?}", count.0);
     Ok(count)
 }
