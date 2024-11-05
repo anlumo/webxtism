@@ -448,12 +448,12 @@ impl Kernel {
             tracing::error!("Failed freeing extism memory: {err:?}");
         }
 
-        let Some(entry) = metadata.vars.get(&key) else {
+        let Some(entry) = metadata.vars.get_var(&key) else {
             tracing::warn!("Var key not found: {key}");
             return 0;
         };
 
-        let handle = match context.memory_new(store, entry.value()) {
+        let handle = match context.memory_new(store, entry) {
             Ok(handle) => handle,
             Err(err) => {
                 tracing::error!("Memory access error: {err}");
@@ -527,7 +527,7 @@ impl Kernel {
             tracing::error!("Failed freeing extism memory: {err:?}");
         }
 
-        metadata.vars.insert(key, value);
+        metadata.vars.set_var(key, value);
     }
 
     /// Make an HTTP request

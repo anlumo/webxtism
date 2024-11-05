@@ -37,11 +37,11 @@ fn fetch_in<IN: FromBytesOwned, ID: PluginIdentifier>(
     input: i64,
 ) -> Result<IN, FetchInError> {
     let handle = plugin
-        .kernel
+        .kernel()
         .memory_handle(&mut store, input as u64)
         .ok_or(FetchInError::HandleNotFound(input))?;
-    let input_message: IN = plugin.kernel.memory_get(&mut store, handle)?;
-    plugin.kernel.memory_free(&mut store, handle)?;
+    let input_message: IN = plugin.kernel().memory_get(&mut store, handle)?;
+    plugin.kernel().memory_free(&mut store, handle)?;
     Ok(input_message)
 }
 
@@ -50,7 +50,7 @@ fn store_out<'o, OUT: ToBytes<'o>, ID: PluginIdentifier>(
     plugin: &Plugin<ID>,
     output: OUT,
 ) -> Result<i64, StoreOutError> {
-    Ok(plugin.kernel.memory_new(&mut store, output)?.offset as i64)
+    Ok(plugin.kernel().memory_new(&mut store, output)?.offset as i64)
 }
 
 impl<'o, IN, OUT, ENV, ID> ToExtern<ID> for ExportDefinition<IN, OUT, ENV>

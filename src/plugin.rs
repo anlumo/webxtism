@@ -4,18 +4,19 @@ use std::{
     sync::{atomic::AtomicUsize, Arc, OnceLock, Weak},
 };
 
-use dashmap::DashMap;
 use extism_convert::{FromBytesOwned, ToBytes};
 use extism_manifest::{Manifest, Wasm};
 use reqwest::{header::HeaderValue, Method};
 use thiserror::Error;
 use tracing::Level;
+use vars::PluginVars;
 use wasmer::{
     AsStoreMut, CompileError, ExportError, Extern, ExternType, Function, FunctionEnv, Imports,
     Instance, InstantiationError, Memory, Module, RuntimeError,
 };
 
 pub mod kernel;
+pub mod vars;
 
 use crate::{function::HostExportBuilderWithFunction, Context, WasmInput, EXTISM_ENV_MODULE};
 use kernel::Kernel;
@@ -42,7 +43,7 @@ pub struct Plugin<ID> {
     context: Weak<Context>,
     modules: BTreeMap<String, Module>,
     metadata: Arc<PluginMetadata<ID>>,
-    pub kernel: Arc<Kernel>,
+    kernel: Arc<Kernel>,
     #[cfg(not(target_arch = "wasm32"))]
     instances: OnceLock<BTreeMap<String, Instance>>,
 }
@@ -53,6 +54,7 @@ impl<ID: PluginIdentifier> Plugin<ID> {
         id: ID,
         input: impl Into<WasmInput<'a>>,
         imports: impl IntoIterator<Item = HostExportBuilderWithFunction<ID>>,
+        vars: impl PluginVars,
     ) -> Result<Arc<Self>, PluginLoadError> {
         let plugin_id = new_plugin_id();
         let kernel = Arc::new(Kernel::new(context, plugin_id));
@@ -68,7 +70,7 @@ impl<ID: PluginIdentifier> Plugin<ID> {
                     Arc::new(PluginMetadata {
                         id,
                         config: Default::default(),
-                        vars: Default::default(),
+                        vars: Arc::new(vars),
                     }),
                 )
             }
@@ -80,7 +82,7 @@ impl<ID: PluginIdentifier> Plugin<ID> {
                         std::borrow::Cow::Borrowed(manifest) => manifest.config.clone(),
                         std::borrow::Cow::Owned(manifest) => manifest.config,
                     },
-                    vars: Default::default(),
+                    vars: Arc::new(vars),
                 }),
             ),
         };
@@ -143,6 +145,10 @@ impl<ID: PluginIdentifier> Plugin<ID> {
 
     pub fn context(&self) -> Option<Arc<Context>> {
         self.context.upgrade().as_ref().cloned()
+    }
+
+    pub fn kernel(&self) -> &Arc<Kernel> {
+        &self.kernel
     }
 
     // WARNING: On wasm32, this only works on the thread that created this plugin.
@@ -660,11 +666,11 @@ pub enum PluginInstantiationError {
     Memory(#[from] wasmer::MemoryError),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PluginMetadata<ID> {
     pub id: ID,
     pub config: BTreeMap<String, String>,
-    pub vars: DashMap<String, Vec<u8>>,
+    pub vars: Arc<dyn PluginVars>,
 }
 
 #[derive(Debug, Error)]
