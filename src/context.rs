@@ -10,9 +10,6 @@ pub struct Context {
     pub(crate) runtime: Module,
 }
 
-unsafe impl Send for Context {}
-unsafe impl Sync for Context {}
-
 impl Default for Context {
     fn default() -> Self {
         ContextBuilder::builder().build()
