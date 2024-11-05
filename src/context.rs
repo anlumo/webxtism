@@ -25,4 +25,8 @@ impl Default for Context {
     }
 }
 
-impl Context {}
+impl Context {
+    pub fn store(&self) -> std::sync::RwLockWriteGuard<'_, wasmer::Store> {
+        self.store.write().unwrap()
+    }
+}

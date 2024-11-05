@@ -1,8 +1,11 @@
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
 use extism_convert::{FromBytes, FromBytesOwned, MemoryHandle, ToBytes};
 use thiserror::Error;
-use wasmer::{FunctionEnvMut, Instance, Memory, MemoryAccessError, MemoryType, RuntimeError};
+use wasmer::{
+    AsStoreMut, AsStoreRef, FunctionEnvMut, Instance, Memory, MemoryAccessError, MemoryType,
+    RuntimeError,
+};
 
 use crate::{Context, EXTISM_ENV_MODULE};
 
@@ -16,7 +19,6 @@ thread_local! {
 pub struct Kernel {
     #[allow(unused)]
     id: usize,
-    context: Weak<Context>,
     #[cfg(not(target_arch = "wasm32"))]
     runtime: wasmer::Instance,
 }
@@ -41,23 +43,12 @@ impl Kernel {
             THREAD_LOCAL_MAP.with(|map| {
                 map.borrow_mut().insert(id, runtime);
             });
-            Self {
-                id,
-                context: Arc::downgrade(context),
-            }
+            Self { id }
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            Self {
-                id,
-                context: Arc::downgrade(context),
-                runtime,
-            }
+            Self { id, runtime }
         }
-    }
-
-    fn context(&self) -> Result<Arc<Context>, ContextGoneError> {
-        self.context.upgrade().ok_or(ContextGoneError::ContextGone)
     }
 
     // WARNING: On wasm32, this only works on the thread that created this kernel.
@@ -95,10 +86,7 @@ impl Kernel {
         .unwrap_or_default()
     }
 
-    pub fn memory_length(&self, offs: u64) -> Result<u64, KernelError> {
-        let context = self.context()?;
-        let mut store = context.store.write().unwrap();
-
+    pub fn memory_length(&self, mut store: impl AsStoreMut, offs: u64) -> Result<u64, KernelError> {
         self.with_runtime(|runtime| {
             Ok(runtime
                 .exports
@@ -110,16 +98,18 @@ impl Kernel {
     }
 
     /// Allocate a handle large enough for the encoded Rust type and copy it into Extism memory
-    pub fn memory_new<'a, T: ToBytes<'a>>(&self, t: T) -> Result<MemoryHandle, KernelError> {
-        let context = self.context()?;
+    pub fn memory_new<'a, T: ToBytes<'a>>(
+        &self,
+        mut store: impl AsStoreMut,
+        t: T,
+    ) -> Result<MemoryHandle, KernelError> {
         let data = t.to_bytes()?;
         let data = data.as_ref();
         if data.is_empty() {
             return Ok(MemoryHandle::null());
         }
-        let handle = self.memory_alloc(data.len() as u64)?;
+        let handle = self.memory_alloc(&mut store, data.len() as u64)?;
 
-        let store = context.store.read().unwrap();
         self.with_runtime::<Result<(), KernelError>>(|runtime| {
             let mem = runtime.exports.get_memory("memory")?.view(&store);
 
@@ -132,17 +122,17 @@ impl Kernel {
         Ok(handle)
     }
 
-    pub fn memory_alloc(&self, n: u64) -> Result<MemoryHandle, KernelError> {
+    pub fn memory_alloc(
+        &self,
+        mut store: impl AsStoreMut,
+        n: u64,
+    ) -> Result<MemoryHandle, KernelError> {
         if n == 0 {
             return Ok(MemoryHandle {
                 offset: 0,
                 length: 0,
             });
         }
-
-        let context = self.context()?;
-
-        let mut store = context.store.write().unwrap();
 
         let offs = self
             .with_runtime::<Result<_, RuntimeError>>(|runtime| {
@@ -164,11 +154,11 @@ impl Kernel {
         })
     }
 
-    pub fn memory_handle(&self, offs: u64) -> Option<MemoryHandle> {
+    pub fn memory_handle(&self, store: impl AsStoreMut, offs: u64) -> Option<MemoryHandle> {
         if offs == 0 {
             return Some(MemoryHandle::null());
         }
-        let len = self.memory_length(offs).unwrap_or_default();
+        let len = self.memory_length(store, offs).unwrap_or_default();
         if len == 0 {
             tracing::trace!("memory handle not found: offs = {offs}",);
             return None;
@@ -182,10 +172,11 @@ impl Kernel {
     }
 
     /// Free a block of Extism plugin memory
-    pub fn memory_free(&self, handle: MemoryHandle) -> Result<(), KernelError> {
-        let context = self.context()?;
-        let mut store = context.store.write().unwrap();
-
+    pub fn memory_free(
+        &self,
+        mut store: impl AsStoreMut,
+        handle: MemoryHandle,
+    ) -> Result<(), KernelError> {
         self.with_runtime(|runtime| {
             runtime
                 .exports
@@ -197,10 +188,11 @@ impl Kernel {
         .ok_or(KernelError::ContextGone)?
     }
 
-    pub fn memory_bytes(&self, handle: MemoryHandle) -> Result<Vec<u8>, KernelError> {
-        let context = self.context()?;
-        let store = context.store.read().unwrap();
-
+    pub fn memory_bytes(
+        &self,
+        store: impl AsStoreRef,
+        handle: MemoryHandle,
+    ) -> Result<Vec<u8>, KernelError> {
         self.with_runtime(|runtime| {
             let mem = runtime.exports.get_memory("memory")?.view(&store);
             mem.copy_range_to_vec(handle.offset..(handle.length + handle.offset))
@@ -211,21 +203,27 @@ impl Kernel {
 
     pub fn memory_get<T: FromBytesOwned>(
         &self,
+        store: impl AsStoreRef,
         handle: MemoryHandle,
     ) -> Result<T, extism_convert::Error> {
-        let bytes = self.memory_bytes(handle)?;
+        let bytes = self.memory_bytes(store, handle)?;
         T::from_bytes(&bytes)
     }
 
-    pub fn memory_string(&self, handle: MemoryHandle) -> Result<String, KernelError> {
-        let bytes = self.memory_bytes(handle)?;
+    pub fn memory_string(
+        &self,
+        store: impl AsStoreRef,
+        handle: MemoryHandle,
+    ) -> Result<String, KernelError> {
+        let bytes = self.memory_bytes(store, handle)?;
         Ok(String::from_utf8(bytes)?)
     }
 
-    pub fn set_input(&self, handle: MemoryHandle) -> Result<(), KernelError> {
-        let context = self.context()?;
-        let mut store = context.store.write().unwrap();
-
+    pub fn set_input(
+        &self,
+        mut store: impl AsStoreMut,
+        handle: MemoryHandle,
+    ) -> Result<(), KernelError> {
         self.with_runtime(|runtime| {
             runtime
                 .exports
@@ -237,10 +235,11 @@ impl Kernel {
         .ok_or(KernelError::ContextGone)?
     }
 
-    pub fn set_output(&self, handle: MemoryHandle) -> Result<(), KernelError> {
-        let context = self.context()?;
-        let mut store = context.store.write().unwrap();
-
+    pub fn set_output(
+        &self,
+        mut store: impl AsStoreMut,
+        handle: MemoryHandle,
+    ) -> Result<(), KernelError> {
         self.with_runtime(|runtime| {
             runtime
                 .exports
@@ -252,10 +251,7 @@ impl Kernel {
         .ok_or(KernelError::ContextGone)?
     }
 
-    pub fn get_output(&self) -> Result<MemoryHandle, KernelError> {
-        let context = self.context()?;
-        let mut store = context.store.write().unwrap();
-
+    pub fn get_output(&self, mut store: impl AsStoreMut) -> Result<MemoryHandle, KernelError> {
         let (offset, length) = self
             .with_runtime::<Result<_, RuntimeError>>(|runtime| {
                 let offset = runtime
@@ -274,10 +270,7 @@ impl Kernel {
         Ok(MemoryHandle { offset, length })
     }
 
-    pub fn get_input(&self) -> Result<MemoryHandle, KernelError> {
-        let context = self.context()?;
-        let mut store = context.store.write().unwrap();
-
+    pub fn get_input(&self, mut store: impl AsStoreMut) -> Result<MemoryHandle, KernelError> {
         let (offset, length) = self
             .with_runtime::<Result<_, RuntimeError>>(|runtime| {
                 let offset = runtime
@@ -296,14 +289,20 @@ impl Kernel {
         Ok(MemoryHandle { offset, length })
     }
 
-    fn log(&self, level: tracing::Level, id: impl AsRef<str>, text: i64) {
+    fn log(
+        &self,
+        mut store: impl AsStoreMut,
+        level: tracing::Level,
+        id: impl AsRef<str>,
+        text: i64,
+    ) {
         let span = tracing::span!(tracing::Level::TRACE, "log", plugin = id.as_ref());
         let _enter = span.enter();
 
-        let Some(handle) = self.memory_handle(text as _) else {
+        let Some(handle) = self.memory_handle(&mut store, text as _) else {
             return;
         };
-        let text = match self.memory_string(handle) {
+        let text = match self.memory_string(&store, handle) {
             Ok(text) => text,
             Err(err) => {
                 tracing::error!("Memory access error: {err}");
@@ -319,45 +318,45 @@ impl Kernel {
             tracing::Level::ERROR => tracing::error!("{text}"),
         }
 
-        if let Err(err) = self.memory_free(handle) {
+        if let Err(err) = self.memory_free(store, handle) {
             tracing::error!("Failed freeing extism memory: {err:?}");
         }
     }
 
     pub(super) fn log_warn<ID: PluginIdentifier>(
-        env: FunctionEnvMut<(Arc<Self>, Arc<PluginMetadata<ID>>)>,
+        mut env: FunctionEnvMut<(Arc<Self>, Arc<PluginMetadata<ID>>)>,
         text: i64,
     ) {
-        let (plugin, metadata) = env.data();
-        plugin.log(tracing::Level::WARN, &metadata.id, text);
+        let ((plugin, metadata), store) = env.data_and_store_mut();
+        plugin.log(store, tracing::Level::WARN, &metadata.id, text);
     }
     pub(super) fn log_info<ID: PluginIdentifier>(
-        env: FunctionEnvMut<(Arc<Self>, Arc<PluginMetadata<ID>>)>,
+        mut env: FunctionEnvMut<(Arc<Self>, Arc<PluginMetadata<ID>>)>,
         text: i64,
     ) {
-        let (plugin, metadata) = env.data();
-        plugin.log(tracing::Level::INFO, &metadata.id, text);
+        let ((plugin, metadata), store) = env.data_and_store_mut();
+        plugin.log(store, tracing::Level::INFO, &metadata.id, text);
     }
     pub(super) fn log_debug<ID: PluginIdentifier>(
-        env: FunctionEnvMut<(Arc<Self>, Arc<PluginMetadata<ID>>)>,
+        mut env: FunctionEnvMut<(Arc<Self>, Arc<PluginMetadata<ID>>)>,
         text: i64,
     ) {
-        let (plugin, metadata) = env.data();
-        plugin.log(tracing::Level::DEBUG, &metadata.id, text);
+        let ((plugin, metadata), store) = env.data_and_store_mut();
+        plugin.log(store, tracing::Level::DEBUG, &metadata.id, text);
     }
     pub(super) fn log_error<ID: PluginIdentifier>(
-        env: FunctionEnvMut<(Arc<Self>, Arc<PluginMetadata<ID>>)>,
+        mut env: FunctionEnvMut<(Arc<Self>, Arc<PluginMetadata<ID>>)>,
         text: i64,
     ) {
-        let (plugin, metadata) = env.data();
-        plugin.log(tracing::Level::ERROR, &metadata.id, text);
+        let ((plugin, metadata), store) = env.data_and_store_mut();
+        plugin.log(store, tracing::Level::ERROR, &metadata.id, text);
     }
     pub(super) fn log_trace<ID: PluginIdentifier>(
-        env: FunctionEnvMut<(Arc<Self>, Arc<PluginMetadata<ID>>)>,
+        mut env: FunctionEnvMut<(Arc<Self>, Arc<PluginMetadata<ID>>)>,
         text: i64,
     ) {
-        let (plugin, metadata) = env.data();
-        plugin.log(tracing::Level::TRACE, &metadata.id, text);
+        let ((plugin, metadata), store) = env.data_and_store_mut();
+        plugin.log(store, tracing::Level::TRACE, &metadata.id, text);
     }
     pub(super) fn get_log_level() -> i64 {
         let level = tracing::level_filters::LevelFilter::current();
@@ -374,10 +373,10 @@ impl Kernel {
     /// **Note**: this function takes ownership of the handle passed in
     /// the caller should not `free` this value
     pub(super) fn config_get<ID: PluginIdentifier>(
-        env: FunctionEnvMut<(Arc<Self>, Arc<PluginMetadata<ID>>)>,
+        mut env: FunctionEnvMut<(Arc<Self>, Arc<PluginMetadata<ID>>)>,
         key: i64,
     ) -> i64 {
-        let (context, metadata) = env.data();
+        let ((context, metadata), mut store) = env.data_and_store_mut();
         let span = tracing::span!(
             tracing::Level::TRACE,
             "config_get",
@@ -385,18 +384,18 @@ impl Kernel {
         );
         let _enter = span.enter();
 
-        let Some(handle) = context.memory_handle(key as _) else {
+        let Some(handle) = context.memory_handle(&mut store, key as _) else {
             tracing::warn!("Memory handle not found: {key}");
             return 0;
         };
-        let key = match context.memory_string(handle) {
+        let key = match context.memory_string(&mut store, handle) {
             Ok(text) => text,
             Err(err) => {
                 tracing::error!("Memory access error: {err}");
                 return 0;
             }
         };
-        if let Err(err) = context.memory_free(handle) {
+        if let Err(err) = context.memory_free(&mut store, handle) {
             tracing::error!("Failed freeing extism memory: {err:?}");
         }
 
@@ -405,7 +404,7 @@ impl Kernel {
             return 0;
         };
 
-        let handle = match context.memory_new(value.as_bytes()) {
+        let handle = match context.memory_new(store, value.as_bytes()) {
             Ok(handle) => handle,
             Err(err) => {
                 tracing::error!("Memory access error: {err}");
@@ -423,10 +422,10 @@ impl Kernel {
     /// the caller should not `free` this value, but the return value
     /// will need to be freed
     pub(super) fn var_get<ID: PluginIdentifier>(
-        env: FunctionEnvMut<(Arc<Self>, Arc<PluginMetadata<ID>>)>,
+        mut env: FunctionEnvMut<(Arc<Self>, Arc<PluginMetadata<ID>>)>,
         key: i64,
     ) -> i64 {
-        let (context, metadata) = env.data();
+        let ((context, metadata), mut store) = env.data_and_store_mut();
         let span = tracing::span!(
             tracing::Level::TRACE,
             "var_get",
@@ -434,18 +433,18 @@ impl Kernel {
         );
         let _enter = span.enter();
 
-        let Some(handle) = context.memory_handle(key as _) else {
+        let Some(handle) = context.memory_handle(&mut store, key as _) else {
             tracing::warn!("Memory handle not found: {key}");
             return 0;
         };
-        let key = match context.memory_string(handle) {
+        let key = match context.memory_string(&mut store, handle) {
             Ok(text) => text,
             Err(err) => {
                 tracing::error!("Memory access error: {err}");
                 return 0;
             }
         };
-        if let Err(err) = context.memory_free(handle) {
+        if let Err(err) = context.memory_free(&mut store, handle) {
             tracing::error!("Failed freeing extism memory: {err:?}");
         }
 
@@ -454,7 +453,7 @@ impl Kernel {
             return 0;
         };
 
-        let handle = match context.memory_new(entry.value()) {
+        let handle = match context.memory_new(store, entry.value()) {
             Ok(handle) => handle,
             Err(err) => {
                 tracing::error!("Memory access error: {err}");
@@ -471,11 +470,11 @@ impl Kernel {
     /// **Note**: this function takes ownership of the handles passed in
     /// the caller should not `free` these values
     pub(super) fn var_set<ID: PluginIdentifier>(
-        env: FunctionEnvMut<(Arc<Self>, Arc<PluginMetadata<ID>>)>,
+        mut env: FunctionEnvMut<(Arc<Self>, Arc<PluginMetadata<ID>>)>,
         key: i64,
         value: i64,
     ) {
-        let (context, metadata) = env.data();
+        let ((context, metadata), mut store) = env.data_and_store_mut();
         let span = tracing::span!(
             tracing::Level::TRACE,
             "var_set",
@@ -483,40 +482,40 @@ impl Kernel {
         );
         let _enter = span.enter();
 
-        let Some(key_handle) = context.memory_handle(key as _) else {
+        let Some(key_handle) = context.memory_handle(&mut store, key as _) else {
             tracing::warn!("Memory handle not found: {key}");
-            let Some(value_handle) = context.memory_handle(value as _) else {
+            let Some(value_handle) = context.memory_handle(&mut store, value as _) else {
                 tracing::warn!("Memory handle not found: {value}");
                 return;
             };
-            if let Err(err) = context.memory_free(value_handle) {
+            if let Err(err) = context.memory_free(&mut store, value_handle) {
                 tracing::error!("Failed freeing extism memory: {err:?}");
             }
             return;
         };
-        let Some(value_handle) = context.memory_handle(value as _) else {
+        let Some(value_handle) = context.memory_handle(&mut store, value as _) else {
             tracing::warn!("Memory handle not found: {value}");
             return;
         };
-        let key = match context.memory_string(key_handle) {
+        let key = match context.memory_string(&mut store, key_handle) {
             Ok(text) => text,
             Err(err) => {
                 tracing::error!("Memory access error: {err}");
-                if let Err(err) = context.memory_free(value_handle) {
+                if let Err(err) = context.memory_free(&mut store, value_handle) {
                     tracing::error!("Failed freeing extism memory: {err:?}");
                 }
                 return;
             }
         };
-        if let Err(err) = context.memory_free(key_handle) {
+        if let Err(err) = context.memory_free(&mut store, key_handle) {
             tracing::error!("Failed freeing extism memory: {err:?}");
         }
 
-        let Some(value_handle) = context.memory_handle(value as _) else {
+        let Some(value_handle) = context.memory_handle(&mut store, value as _) else {
             tracing::warn!("Memory handle not found: {key}");
             return;
         };
-        let value = match context.memory_bytes(value_handle) {
+        let value = match context.memory_bytes(&mut store, value_handle) {
             Ok(bytes) => bytes,
             Err(err) => {
                 tracing::error!("Memory access error: {err}");
@@ -524,7 +523,7 @@ impl Kernel {
             }
         };
 
-        if let Err(err) = context.memory_free(value_handle) {
+        if let Err(err) = context.memory_free(store, value_handle) {
             tracing::error!("Failed freeing extism memory: {err:?}");
         }
 

@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     str::FromStr,
-    sync::{atomic::AtomicUsize, Arc, Weak},
+    sync::{atomic::AtomicUsize, Arc, OnceLock, Weak},
 };
 
 use dashmap::DashMap;
@@ -11,8 +11,8 @@ use reqwest::{header::HeaderValue, Method};
 use thiserror::Error;
 use tracing::Level;
 use wasmer::{
-    CompileError, ExportError, Extern, ExternType, Function, FunctionEnv, Imports, Instance,
-    InstantiationError, Memory, Module, RuntimeError,
+    AsStoreMut, CompileError, ExportError, Extern, ExternType, Function, FunctionEnv, Imports,
+    Instance, InstantiationError, Memory, Module, RuntimeError,
 };
 
 pub mod kernel;
@@ -36,15 +36,15 @@ fn new_plugin_id() -> usize {
     PLUGIN_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-#[allow(unused)]
 pub struct Plugin<ID> {
+    #[allow(unused)]
     id: usize,
     context: Weak<Context>,
     modules: BTreeMap<String, Module>,
     metadata: Arc<PluginMetadata<ID>>,
     pub kernel: Arc<Kernel>,
     #[cfg(not(target_arch = "wasm32"))]
-    instances: BTreeMap<String, Instance>,
+    instances: OnceLock<BTreeMap<String, Instance>>,
 }
 
 impl<ID: PluginIdentifier> Plugin<ID> {
@@ -52,8 +52,8 @@ impl<ID: PluginIdentifier> Plugin<ID> {
         context: &Arc<Context>,
         id: ID,
         input: impl Into<WasmInput<'a>>,
-        imports: impl IntoIterator<Item = crate::HostExport>,
-    ) -> Result<Self, PluginLoadError> {
+        imports: impl IntoIterator<Item = crate::HostExport<ID>>,
+    ) -> Result<Arc<Self>, PluginLoadError> {
         let plugin_id = new_plugin_id();
         let kernel = Arc::new(Kernel::new(context, plugin_id));
 
@@ -61,15 +61,10 @@ impl<ID: PluginIdentifier> Plugin<ID> {
             WasmInput::Data(data) => {
                 let store = context.store.read().unwrap();
                 let mut module = Module::new(&store, data)?;
-                let name = if let Some(name) = module.name() {
-                    name.to_owned()
-                } else {
-                    module.set_name(DEFAULT_MODULE_NAME);
-                    DEFAULT_MODULE_NAME.to_owned()
-                };
+                module.set_name(DEFAULT_MODULE_NAME);
 
                 (
-                    BTreeMap::from([(name, module)]),
+                    BTreeMap::from([(DEFAULT_MODULE_NAME.to_owned(), module)]),
                     Arc::new(PluginMetadata {
                         id,
                         config: Default::default(),
@@ -89,52 +84,61 @@ impl<ID: PluginIdentifier> Plugin<ID> {
                 }),
             ),
         };
+        #[cfg(target_arch = "wasm32")]
+        let instance = Arc::new(Self {
+            id: plugin_id,
+            context: Arc::downgrade(context),
+            modules,
+            metadata,
+            kernel,
+        });
+        #[cfg(not(target_arch = "wasm32"))]
+        let instance = Arc::new(Self {
+            id: plugin_id,
+            context: Arc::downgrade(context),
+            modules,
+            metadata,
+            kernel,
+            instances: OnceLock::new(),
+        });
+
         let external_imports = imports
             .into_iter()
-            .map(|e| ((e.namespace().to_owned(), e.name), e.wasmer_extern))
+            .map(|e| {
+                (
+                    (e.namespace().to_owned(), e.name.clone()),
+                    e.build(context, &instance),
+                )
+            })
             .chain(
-                Self::host_env(context, &kernel, metadata.clone())
+                Self::host_env(context, &instance.kernel, instance.metadata.clone())
                     .into_iter()
                     .map(|(name, external)| ((EXTISM_ENV_MODULE.to_owned(), name), external)),
             )
             .collect();
         let mut instances = BTreeMap::new();
-        for (name, module) in modules.iter() {
+        for (name, module) in instance.modules.iter() {
             Self::instantiate_module(
                 context,
                 name,
                 module,
                 &mut instances,
-                &modules,
+                &instance.modules,
                 &external_imports,
                 &[],
             )?;
         }
-
         #[cfg(target_arch = "wasm32")]
         {
             THREAD_LOCAL_MAP.with(|map| {
                 map.borrow_mut().insert(plugin_id, instances);
             });
-            Ok(Self {
-                id: plugin_id,
-                context: Arc::downgrade(context),
-                modules,
-                metadata,
-                kernel,
-            })
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            Ok(Self {
-                id: plugin_id,
-                context: Arc::downgrade(context),
-                modules,
-                metadata,
-                kernel,
-                instances,
-            })
+            instance.instances.set(instances).unwrap();
         }
+        Ok(instance)
     }
 
     pub fn context(&self) -> Result<Arc<Context>, ContextGoneError> {
@@ -162,11 +166,11 @@ impl<ID: PluginIdentifier> Plugin<ID> {
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            Ok(f(&self.instances))
+            Ok(f(self.instances.get().unwrap()))
         }
     }
 
-    #[allow(clippy::result_large_err)]
+    #[allow(clippy::result_large_err, clippy::too_many_arguments)]
     fn instantiate_module(
         context: &Context,
         name: &str,
@@ -348,20 +352,17 @@ impl<ID: PluginIdentifier> Plugin<ID> {
         Ok(tuples.into_iter().collect())
     }
 
-    /// MARK: Call functions
+    // MARK: Call functions
 
     pub fn call_in_out<'i, IN: ToBytes<'i>, OUT: FromBytesOwned>(
         &self,
+        mut store: impl AsStoreMut,
         name: &str,
         arg: IN,
     ) -> Result<OUT, PluginRunError> {
-        let Some(context) = self.context.upgrade() else {
-            return Err(PluginRunError::ContextGone);
-        };
-
-        let handle = self.kernel.memory_new(arg)?;
-        if let Err(err) = self.kernel.set_input(handle) {
-            if self.kernel.memory_free(handle).is_err() {
+        let handle = self.kernel.memory_new(&mut store, arg)?;
+        if let Err(err) = self.kernel.set_input(&mut store, handle) {
+            if self.kernel.memory_free(&mut store, handle).is_err() {
                 tracing::error!("Failed to free memory {}", handle.offset);
             }
             return Err(err.into());
@@ -378,8 +379,6 @@ impl<ID: PluginIdentifier> Plugin<ID> {
             };
 
             let err_handle = {
-                let mut store = context.store.write().unwrap();
-
                 instance
                     .exports
                     .get_typed_function::<(), i32>(&store, name)?
@@ -392,23 +391,23 @@ impl<ID: PluginIdentifier> Plugin<ID> {
             todo!()
         }
 
-        let output_handle = self.kernel.get_output()?;
-        let output: OUT = self.kernel.memory_get(output_handle)?;
+        let output_handle = self.kernel.get_output(&mut store)?;
+        let output: OUT = self.kernel.memory_get(&mut store, output_handle)?;
 
-        if self.kernel.memory_free(output_handle).is_err() {
+        if self.kernel.memory_free(&mut store, output_handle).is_err() {
             tracing::error!("Failed to free memory {}", output_handle.offset);
         }
 
         Ok(output)
     }
 
-    pub fn call_in<'i, IN: ToBytes<'i>>(&self, name: &str, arg: IN) -> Result<(), PluginRunError> {
-        let Some(context) = self.context.upgrade() else {
-            return Err(PluginRunError::ContextGone);
-        };
-
-        let mut store = context.store.write().unwrap();
-        let handle = self.kernel.memory_new(arg)?;
+    pub fn call_in<'i, IN: ToBytes<'i>>(
+        &self,
+        mut store: impl AsStoreMut,
+        name: &str,
+        arg: IN,
+    ) -> Result<(), PluginRunError> {
+        let handle = self.kernel.memory_new(&mut store, arg)?;
 
         let err_handle = self.with_instances(|instances| {
             let Some(instance) = instances.get(DEFAULT_MODULE_NAME) else {
@@ -420,7 +419,7 @@ impl<ID: PluginIdentifier> Plugin<ID> {
                 return Err(PluginRunError::NoMainModule);
             };
 
-            self.kernel.set_input(handle)?;
+            self.kernel.set_input(&mut store, handle)?;
 
             let err_handle = instance
                 .exports
@@ -437,12 +436,11 @@ impl<ID: PluginIdentifier> Plugin<ID> {
         Ok(())
     }
 
-    pub fn call_out<OUT: FromBytesOwned>(&self, name: &str) -> Result<OUT, PluginRunError> {
-        let Some(context) = self.context.upgrade() else {
-            return Err(PluginRunError::ContextGone);
-        };
-
-        let mut store = context.store.write().unwrap();
+    pub fn call_out<OUT: FromBytesOwned>(
+        &self,
+        mut store: impl AsStoreMut,
+        name: &str,
+    ) -> Result<OUT, PluginRunError> {
         let err_handle = self.with_instances(|instances| {
             let Some(instance) = instances.get(DEFAULT_MODULE_NAME) else {
                 tracing::event!(
@@ -464,22 +462,17 @@ impl<ID: PluginIdentifier> Plugin<ID> {
             todo!()
         }
 
-        let output_handle = self.kernel.get_output()?;
-        let output: OUT = self.kernel.memory_get(output_handle)?;
+        let output_handle = self.kernel.get_output(&mut store)?;
+        let output: OUT = self.kernel.memory_get(&mut store, output_handle)?;
 
-        if self.kernel.memory_free(output_handle).is_err() {
+        if self.kernel.memory_free(&mut store, output_handle).is_err() {
             tracing::error!("Failed to free memory {}", output_handle.offset);
         }
 
         Ok(output)
     }
 
-    pub fn call(&self, name: &str) -> Result<(), PluginRunError> {
-        let Some(context) = self.context.upgrade() else {
-            return Err(PluginRunError::ContextGone);
-        };
-
-        let mut store = context.store.write().unwrap();
+    pub fn call(&self, mut store: impl AsStoreMut, name: &str) -> Result<(), PluginRunError> {
         let err_handle = self.with_instances(|instances| {
             let Some(instance) = instances.get(DEFAULT_MODULE_NAME) else {
                 return Err(PluginRunError::NoMainModule);
@@ -499,7 +492,7 @@ impl<ID: PluginIdentifier> Plugin<ID> {
         Ok(())
     }
 
-    /// MARK: Runtime
+    // MARK: Runtime
 
     pub(crate) fn host_env(
         context: &Arc<Context>,
@@ -680,8 +673,6 @@ pub struct PluginMetadata<ID> {
 
 #[derive(Debug, Error)]
 pub enum PluginRunError {
-    #[error("Context gone")]
-    ContextGone,
     #[error("Context: {0}")]
     Context(#[from] kernel::KernelError),
     #[error("No main module")]
@@ -700,10 +691,4 @@ pub enum PluginRunError {
 pub enum ContextGoneError {
     #[error("Context gone")]
     ContextGone,
-}
-
-impl From<ContextGoneError> for PluginRunError {
-    fn from(_err: ContextGoneError) -> Self {
-        PluginRunError::ContextGone
-    }
 }
