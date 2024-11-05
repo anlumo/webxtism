@@ -4,7 +4,7 @@ mod plugin;
 mod wasm_input;
 
 pub use context::Context;
-pub use function::HostExport;
+pub use function::HostExportBuilder;
 pub use plugin::{
     kernel::{Kernel, KernelError},
     Plugin, PluginIdentifier,

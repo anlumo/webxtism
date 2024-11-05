@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use extism_convert::{FromBytes, Json, ToBytes};
 use tracing::level_filters::LevelFilter;
-use webxtism::{HostExport, Plugin};
+use webxtism::{HostExportBuilder, Plugin};
 
 #[allow(unused)]
 #[derive(serde::Deserialize, serde::Serialize, ToBytes, FromBytes, Debug)]
@@ -41,12 +41,9 @@ async fn main() {
         &context,
         "host_function",
         host_function_plugin.as_ref(),
-        [HostExport::new_with_in_out(
-            Some("extism:env/user"),
-            "hello_world",
-            hello_world,
-            (),
-        )],
+        [HostExportBuilder::new("hello_world")
+            .namespace("extism:env/user")
+            .function_in_out(hello_world, ())],
     )
     .await
     .unwrap();

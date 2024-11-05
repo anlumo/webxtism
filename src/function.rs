@@ -6,10 +6,11 @@ use wasmer::{AsStoreMut, Extern, Function, FunctionEnv, FunctionEnvMut};
 
 use crate::{plugin::kernel::KernelError, Context, Plugin, PluginIdentifier};
 
-pub(crate) trait ToExtern<ID: PluginIdentifier> {
+trait ToExtern<ID: PluginIdentifier> {
     fn to_extern(self: Box<Self>, context: &Arc<Context>, plugin: &Arc<Plugin<ID>>) -> Extern;
 }
 
+#[allow(clippy::type_complexity)]
 pub enum ExportDefinition<IN, OUT, ENV> {
     InOut {
         function: Box<dyn Fn(&ENV, IN) -> Result<OUT, ()> + Send + Sync + 'static>,
@@ -27,6 +28,28 @@ pub enum ExportDefinition<IN, OUT, ENV> {
         function: Box<dyn Fn(&ENV) + Send + Sync + 'static>,
         env: ENV,
     },
+}
+
+fn fetch_in<IN: FromBytesOwned, ID: PluginIdentifier>(
+    mut store: impl AsStoreMut,
+    plugin: &Plugin<ID>,
+    input: i64,
+) -> Result<IN, FetchInError> {
+    let handle = plugin
+        .kernel
+        .memory_handle(&mut store, input as u64)
+        .ok_or(FetchInError::HandleNotFound(input))?;
+    let input_message: IN = plugin.kernel.memory_get(&mut store, handle)?;
+    plugin.kernel.memory_free(&mut store, handle)?;
+    Ok(input_message)
+}
+
+fn store_out<'o, OUT: ToBytes<'o>, ID: PluginIdentifier>(
+    mut store: impl AsStoreMut,
+    plugin: &Plugin<ID>,
+    output: OUT,
+) -> Result<i64, StoreOutError> {
+    Ok(plugin.kernel.memory_new(&mut store, output)?.offset as i64)
 }
 
 impl<'o, IN, OUT, ENV, ID> ToExtern<ID> for ExportDefinition<IN, OUT, ENV>
@@ -47,7 +70,7 @@ where
                     move |mut fenv: FunctionEnvMut<'_, (Weak<Plugin<ID>>, ENV)>, input: i64| {
                         let ((plugin, env), mut store) = fenv.data_and_store_mut();
                         if let Some(plugin) = plugin.upgrade() {
-                            let input = match HostExport::fetch_in(&mut store, &plugin, input) {
+                            let input = match fetch_in(&mut store, &plugin, input) {
                                 Ok(input) => input,
                                 Err(err) => {
                                     tracing::error!("{err}");
@@ -55,12 +78,10 @@ where
                                 }
                             };
                             if let Ok(output) = function(env, input) {
-                                HostExport::store_out(store, &plugin, output).unwrap_or_else(
-                                    |err| {
-                                        tracing::error!("{err}");
-                                        0
-                                    },
-                                )
+                                store_out(store, &plugin, output).unwrap_or_else(|err| {
+                                    tracing::error!("{err}");
+                                    0
+                                })
                             } else {
                                 tracing::warn!("Host function error");
                                 0
@@ -80,7 +101,7 @@ where
                     move |mut fenv: FunctionEnvMut<'_, (Weak<Plugin<ID>>, ENV)>, input: i64| {
                         let ((plugin, env), store) = fenv.data_and_store_mut();
                         if let Some(plugin) = plugin.upgrade() {
-                            let input = match HostExport::fetch_in(store, &plugin, input) {
+                            let input = match fetch_in(store, &plugin, input) {
                                 Ok(input) => input,
                                 Err(err) => {
                                     tracing::error!("{err}");
@@ -105,7 +126,7 @@ where
                                 tracing::warn!("Host function error");
                                 return 0;
                             };
-                            HostExport::store_out(fenv, &plugin, output).unwrap_or_else(|err| {
+                            store_out(fenv, &plugin, output).unwrap_or_else(|err| {
                                 tracing::error!("{err}");
                                 0
                             })
@@ -130,27 +151,37 @@ where
     }
 }
 
-pub struct HostExport<ID> {
+pub struct HostExportBuilder {
     pub name: String,
     pub namespace: Option<String>,
-    definition: Box<dyn ToExtern<ID>>,
 }
 
-impl<ID: PluginIdentifier> HostExport<ID> {
-    pub fn new_with_in_out<'o, IN, OUT, ENV>(
-        namespace: Option<&str>,
-        name: &str,
+impl HostExportBuilder {
+    pub fn new(name: impl AsRef<str>) -> Self {
+        Self {
+            name: name.as_ref().to_owned(),
+            namespace: None,
+        }
+    }
+    pub fn namespace(mut self, namespace: impl AsRef<str>) -> Self {
+        self.namespace = Some(namespace.as_ref().to_owned());
+        self
+    }
+
+    pub fn function_in_out<'o, IN, OUT, ENV, ID>(
+        self,
         f: impl Fn(&ENV, IN) -> Result<OUT, ()> + Send + Sync + 'static,
         env: ENV,
-    ) -> Self
+    ) -> HostExportBuilderWithFunction<ID>
     where
         IN: FromBytesOwned + 'static,
         OUT: ToBytes<'o> + 'static,
         ENV: Send + 'static,
+        ID: PluginIdentifier,
     {
-        Self {
-            name: name.to_owned(),
-            namespace: namespace.map(|ns| ns.to_owned()),
+        HostExportBuilderWithFunction {
+            name: self.name,
+            namespace: self.namespace,
             definition: Box::new(ExportDefinition::InOut {
                 function: Box::new(f),
                 env,
@@ -158,19 +189,19 @@ impl<ID: PluginIdentifier> HostExport<ID> {
         }
     }
 
-    pub fn new_with_in<IN, ENV>(
-        namespace: Option<&str>,
-        name: &str,
+    pub fn function_in<IN, ENV, ID>(
+        self,
         f: impl Fn(&ENV, IN) + Send + Sync + 'static,
         env: ENV,
-    ) -> Self
+    ) -> HostExportBuilderWithFunction<ID>
     where
         IN: FromBytesOwned + 'static,
         ENV: Send + 'static,
+        ID: PluginIdentifier,
     {
-        Self {
-            name: name.to_owned(),
-            namespace: namespace.map(|ns| ns.to_owned()),
+        HostExportBuilderWithFunction {
+            name: self.name,
+            namespace: self.namespace,
             definition: Box::new(ExportDefinition::<_, (), _>::In {
                 function: Box::new(f),
                 env,
@@ -178,19 +209,19 @@ impl<ID: PluginIdentifier> HostExport<ID> {
         }
     }
 
-    pub fn new_with_out<'o, OUT, ENV>(
-        namespace: Option<&str>,
-        name: &str,
+    pub fn function_out<'o, OUT, ENV, ID>(
+        self,
         f: impl Fn(&ENV) -> Result<OUT, ()> + Send + Sync + 'static,
         env: ENV,
-    ) -> Self
+    ) -> HostExportBuilderWithFunction<ID>
     where
         OUT: ToBytes<'o> + 'static,
         ENV: Send + 'static,
+        ID: PluginIdentifier,
     {
-        Self {
-            name: name.to_owned(),
-            namespace: namespace.map(|ns| ns.to_owned()),
+        HostExportBuilderWithFunction {
+            name: self.name,
+            namespace: self.namespace,
             definition: Box::new(ExportDefinition::<(), _, _>::Out {
                 function: Box::new(f),
                 env,
@@ -198,51 +229,41 @@ impl<ID: PluginIdentifier> HostExport<ID> {
         }
     }
 
-    pub fn new<ENV>(
-        namespace: Option<&str>,
-        name: &str,
+    pub fn function<ENV, ID>(
+        self,
         f: impl Fn(&ENV) + Send + Sync + 'static,
         env: ENV,
-    ) -> Self
+    ) -> HostExportBuilderWithFunction<ID>
     where
         ENV: Send + 'static,
+        ID: PluginIdentifier,
     {
-        Self {
-            name: name.to_owned(),
-            namespace: namespace.map(|ns| ns.to_owned()),
+        HostExportBuilderWithFunction {
+            name: self.name,
+            namespace: self.namespace,
             definition: Box::new(ExportDefinition::<(), (), _>::Bare {
                 function: Box::new(f),
                 env,
             }),
         }
     }
+}
 
-    fn fetch_in<IN: FromBytesOwned>(
-        mut store: impl AsStoreMut,
-        plugin: &Plugin<ID>,
-        input: i64,
-    ) -> Result<IN, FetchInError> {
-        let handle = plugin
-            .kernel
-            .memory_handle(&mut store, input as u64)
-            .ok_or(FetchInError::HandleNotFound(input))?;
-        let input_message: IN = plugin.kernel.memory_get(&mut store, handle)?;
-        plugin.kernel.memory_free(&mut store, handle)?;
-        Ok(input_message)
-    }
+pub struct HostExportBuilderWithFunction<ID> {
+    pub(crate) name: String,
+    pub(crate) namespace: Option<String>,
+    definition: Box<dyn ToExtern<ID>>,
+}
 
-    fn store_out<'o, OUT: ToBytes<'o>>(
-        mut store: impl AsStoreMut,
-        plugin: &Plugin<ID>,
-        output: OUT,
-    ) -> Result<i64, StoreOutError> {
-        Ok(plugin.kernel.memory_new(&mut store, output)?.offset as i64)
-    }
-
-    pub fn namespace(&self) -> &str {
+impl<ID: PluginIdentifier> HostExportBuilderWithFunction<ID> {
+    pub fn get_namespace(&self) -> &str {
         self.namespace
             .as_deref()
             .unwrap_or(crate::EXTISM_USER_MODULE)
+    }
+    pub fn namespace(mut self, namespace: impl AsRef<str>) -> Self {
+        self.namespace = Some(namespace.as_ref().to_owned());
+        self
     }
 
     pub(crate) fn build(self, context: &Arc<Context>, plugin: &Arc<Plugin<ID>>) -> Extern {

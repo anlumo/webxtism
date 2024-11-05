@@ -17,7 +17,7 @@ use wasmer::{
 
 pub mod kernel;
 
-use crate::{Context, WasmInput, EXTISM_ENV_MODULE};
+use crate::{function::HostExportBuilderWithFunction, Context, WasmInput, EXTISM_ENV_MODULE};
 use kernel::Kernel;
 
 pub trait PluginIdentifier: AsRef<str> + Send + Sync + 'static {}
@@ -52,7 +52,7 @@ impl<ID: PluginIdentifier> Plugin<ID> {
         context: &Arc<Context>,
         id: ID,
         input: impl Into<WasmInput<'a>>,
-        imports: impl IntoIterator<Item = crate::HostExport<ID>>,
+        imports: impl IntoIterator<Item = HostExportBuilderWithFunction<ID>>,
     ) -> Result<Arc<Self>, PluginLoadError> {
         let plugin_id = new_plugin_id();
         let kernel = Arc::new(Kernel::new(context, plugin_id));
@@ -106,7 +106,7 @@ impl<ID: PluginIdentifier> Plugin<ID> {
             .into_iter()
             .map(|e| {
                 (
-                    (e.namespace().to_owned(), e.name.clone()),
+                    (e.get_namespace().to_owned(), e.name.clone()),
                     e.build(context, &instance),
                 )
             })
