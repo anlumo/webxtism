@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     str::FromStr,
-    sync::{atomic::AtomicUsize, Arc, OnceLock, Weak},
+    sync::{atomic::AtomicUsize, Arc, Weak},
 };
 
 use extism_convert::{FromBytesOwned, ToBytes};
@@ -45,7 +45,7 @@ pub struct Plugin<ID> {
     metadata: Arc<PluginMetadata<ID>>,
     kernel: Arc<Kernel>,
     #[cfg(not(target_arch = "wasm32"))]
-    instances: OnceLock<BTreeMap<String, Instance>>,
+    instances: std::sync::OnceLock<BTreeMap<String, Instance>>,
 }
 
 impl<ID: PluginIdentifier> Plugin<ID> {
@@ -102,7 +102,7 @@ impl<ID: PluginIdentifier> Plugin<ID> {
             modules,
             metadata,
             kernel,
-            instances: OnceLock::new(),
+            instances: std::sync::OnceLock::new(),
         });
 
         let external_imports = imports
@@ -174,7 +174,7 @@ impl<ID: PluginIdentifier> Plugin<ID> {
             THREAD_LOCAL_MAP.with(|map| {
                 let plugins = map.borrow();
                 let Some(instances) = plugins.get(&self.id) else {
-                    return Err(PluginRunError::ContextGone);
+                    return Err(PluginRunError::PluginNotFound);
                 };
                 Ok(f(instances))
             })
@@ -715,8 +715,8 @@ pub enum PluginRunError {
     Export(#[from] ExportError),
     #[error("Runtime: {0}")]
     Runtime(#[from] RuntimeError),
-    #[error("Output handle not found")]
-    OutputHandleNotFound,
+    #[error("Plugin not found")]
+    PluginNotFound,
     #[error("Extism convert: {0}")]
     Extism(#[from] extism_convert::Error),
 }

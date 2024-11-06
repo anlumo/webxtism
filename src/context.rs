@@ -1,7 +1,10 @@
 use std::sync::RwLock;
 
 use typed_builder::TypedBuilder;
-use wasmer::{Module, NativeEngineExt, Store, TrapHandlerFn};
+use wasmer::{Module, Store};
+
+#[cfg(not(target_arch = "wasm32"))]
+use wasmer::{NativeEngineExt, TrapHandlerFn};
 
 const RUNTIME: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/extism-runtime.wasm"));
 
@@ -25,18 +28,24 @@ impl Context {
 #[derive(TypedBuilder)]
 #[builder(build_method(into = Context))]
 pub struct ContextSettings {
+    #[cfg(not(target_arch = "wasm32"))]
     #[builder(default, setter(strip_option))]
     trap_handler: Option<Box<TrapHandlerFn<'static>>>,
+    #[cfg(not(target_arch = "wasm32"))]
     #[builder(default, setter(transform=|tunables: impl wasmer::Tunables + Send + Sync + 'static| Some(Box::new(tunables) as Box<dyn wasmer::Tunables + Send + Sync + 'static>)))]
     tunables: Option<Box<dyn wasmer::Tunables + Send + Sync + 'static>>,
 }
 
 impl From<ContextSettings> for Context {
+    #[allow(unused, unused_mut)]
     fn from(builder: ContextSettings) -> Self {
         let mut store = Store::default();
-        store.set_trap_handler(builder.trap_handler);
-        if let Some(tunables) = builder.tunables {
-            store.engine_mut().set_tunables(tunables);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            store.set_trap_handler(builder.trap_handler);
+            if let Some(tunables) = builder.tunables {
+                store.engine_mut().set_tunables(tunables);
+            }
         }
 
         let runtime = Module::new(&store, RUNTIME).unwrap();
