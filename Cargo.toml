@@ -17,15 +17,18 @@ tracing = "0.1.40"
 typed-builder = "0.20.0"
 wasmer-types = "5.0.1"
 wasmer-wasix = { version = "0.31.0", optional = true }
+serde = { version = "1.0.214", features = ["derive"], optional = true }
 
 [features]
-default = ["compiler", "llvm"]
-compiler = ["wasmer/sys"]
+default = ["compiler", "serialize", "cranelift"]
+compiler = ["wasmer/compiler"]
 llvm = ["wasmer/llvm"]
+cranelift = ["wasmer/cranelift"]
 wasix = ["wasmer-wasix"]
+serialize = ["serde"]
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tokio = { version = "1.41.0", features = ["fs"] }
+tokio = { version = "1.41.1", features = ["fs"] }
 wasmer = { version = "5.0.1", default-features = false, features = ["std"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -39,7 +42,8 @@ tokio = { version = "1.41.0", features = ["rt-multi-thread", "macros"] }
 reqwest = { version = "0.12.9" }
 serde = { version = "1.0.214", features = ["derive"] }
 tracing-subscriber = "0.3.18"
-wasmer = { version = "5.0.1", default-features = false, features = ["llvm"] }
+wasmer = { version = "5.0.1" }
+serde_cbor = "0.11.2"
 
 [build-dependencies]
 reqwest = { version = "0.12.9", features = ["blocking"] }

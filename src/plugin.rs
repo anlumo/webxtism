@@ -86,8 +86,16 @@ impl<ID: PluginIdentifier> Plugin<ID> {
                     vars: Arc::new(vars),
                 }),
             ),
-            WasmInput::Module(module) => (
-                BTreeMap::from([(DEFAULT_MODULE_NAME.to_owned(), module)]),
+            WasmInput::Modules(modules) => (
+                modules
+                    .into_iter()
+                    .map(|(name, module)| {
+                        (
+                            name.unwrap_or_else(|| DEFAULT_MODULE_NAME.to_owned()),
+                            module,
+                        )
+                    })
+                    .collect(),
                 Arc::new(PluginMetadata {
                     id,
                     config: Default::default(),
@@ -162,6 +170,54 @@ impl<ID: PluginIdentifier> Plugin<ID> {
             instance.instances.set(instances).unwrap();
         }
         Ok(instance)
+    }
+
+    #[cfg(feature = "serialize")]
+    /// Deserialize a plugin from a deserializer.
+    ///
+    /// This function is intended to be used with a deserializer that
+    /// deserializes a `BTreeMap` of module names to `Vec<u8>`, as generated
+    /// when serializing a Plugin via serde. For example, you can use
+    /// the `serde_cbor` crate to deserialize a CBOR-encoded plugin.
+    /// serde_json will not work due to JSON not supporting binary data.
+    ///
+    /// The deserialized plugin will be instantiated just like with a
+    /// call to [Plugin<ID>::new].
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if the deserialization fails,
+    /// or if the plugin cannot be instantiated.
+    ///
+    /// # Safety
+    ///
+    /// This function loads executable code into memory. You must trust
+    /// the loaded bytes to be valid for the chosen engine and for the
+    /// host CPU architecture.
+    pub async unsafe fn deserialize<'de, D: serde::Deserializer<'de>>(
+        context: &'de Arc<Context>,
+        id: ID,
+        input: D,
+        imports: impl IntoIterator<Item = HostExportBuilderWithFunction<ID>>,
+        vars: impl PluginVars,
+        #[cfg(feature = "wasix")] wasix: Option<&mut wasmer_wasix::WasiFunctionEnv>,
+    ) -> Result<Arc<Self>, PluginDeserializeError> {
+        let modules = input
+            .deserialize_map(PluginModuleVisitor {
+                engine: context.store.read().unwrap(),
+            })
+            .map_err(|_| PluginDeserializeError::Deserialize)?;
+
+        Ok(Self::new(
+            context,
+            id,
+            WasmInput::Modules(modules),
+            imports,
+            vars,
+            #[cfg(feature = "wasix")]
+            wasix,
+        )
+        .await?)
     }
 
     pub fn context(&self) -> Option<Arc<Context>> {
@@ -644,6 +700,31 @@ impl<ID: PluginIdentifier> Plugin<ID> {
     }
 }
 
+#[cfg(feature = "serialize")]
+impl<ID: PluginIdentifier> serde::Serialize for Plugin<ID> {
+    /// This function only serializes the modules themselves, not the runtime state.
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap;
+
+        let mut plugin = serializer.serialize_map(Some(self.modules.len()))?;
+
+        for (name, module) in &self.modules {
+            plugin.serialize_entry(
+                name,
+                module
+                    .serialize()
+                    .map_err(serde::ser::Error::custom)?
+                    .as_ref(),
+            )?;
+        }
+
+        plugin.end()
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 impl<ID> Drop for Plugin<ID> {
     fn drop(&mut self) {
@@ -706,6 +787,15 @@ pub enum PluginInstantiationError {
     Wasix(#[from] wasmer_wasix::WasiError),
 }
 
+#[cfg(feature = "serialize")]
+#[derive(Debug, Error)]
+pub enum PluginDeserializeError {
+    #[error("Deserialize failed")]
+    Deserialize,
+    #[error("Load: {0}")]
+    Instantiation(#[from] PluginLoadError),
+}
+
 #[derive(Clone)]
 pub struct PluginMetadata<ID> {
     pub id: ID,
@@ -727,4 +817,34 @@ pub enum PluginRunError {
     PluginNotFound,
     #[error("Extism convert: {0}")]
     Extism(#[from] extism_convert::Error),
+}
+
+#[cfg(feature = "serialize")]
+struct PluginModuleVisitor<E> {
+    engine: E,
+}
+
+#[cfg(feature = "serialize")]
+impl<'de, E> serde::de::Visitor<'de> for PluginModuleVisitor<E>
+where
+    E: wasmer::AsEngineRef,
+{
+    type Value = BTreeMap<Option<String>, Module>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str("a map of modules")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::MapAccess<'de>,
+    {
+        let mut modules = BTreeMap::new();
+        while let Some((key, value)) = map.next_entry::<Option<String>, Vec<u8>>()? {
+            let module = unsafe { Module::deserialize(&self.engine, &value) }
+                .map_err(serde::de::Error::custom)?;
+            modules.insert(key, module);
+        }
+        Ok(modules)
+    }
 }

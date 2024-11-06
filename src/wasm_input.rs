@@ -1,6 +1,6 @@
-use std::borrow::Cow;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
+use std::{borrow::Cow, collections::BTreeMap};
 
 use extism_manifest::Manifest;
 use wasmer::Module;
@@ -8,7 +8,7 @@ use wasmer::Module;
 pub enum WasmInput<'a> {
     Data(Cow<'a, [u8]>),
     Manifest(Cow<'a, Manifest>),
-    Module(Module),
+    Modules(BTreeMap<Option<String>, Module>),
 }
 
 impl WasmInput<'_> {
