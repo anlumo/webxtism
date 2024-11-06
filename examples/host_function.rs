@@ -3,7 +3,7 @@ use std::sync::Arc;
 use extism_convert::{FromBytes, Json, ToBytes};
 use tracing::level_filters::LevelFilter;
 use wasmer::StoreMut;
-use webxtism::{HostExportBuilder, Plugin};
+use webxtism::{HostExportBuilder, InMemoryVars, Plugin};
 
 #[allow(unused)]
 #[derive(serde::Deserialize, serde::Serialize, ToBytes, FromBytes, Debug)]
@@ -49,6 +49,9 @@ async fn main() {
         [HostExportBuilder::new("hello_world")
             .namespace("extism:env/user")
             .function_in_out(hello_world, ())],
+        InMemoryVars::default(),
+        #[cfg(feature = "wasix")]
+        None,
     )
     .await
     .unwrap();

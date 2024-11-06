@@ -55,6 +55,7 @@ impl<ID: PluginIdentifier> Plugin<ID> {
         input: impl Into<WasmInput<'a>>,
         imports: impl IntoIterator<Item = HostExportBuilderWithFunction<ID>>,
         vars: impl PluginVars,
+        #[cfg(feature = "wasix")] mut wasix: Option<&mut wasmer_wasix::WasiFunctionEnv>,
     ) -> Result<Arc<Self>, PluginLoadError> {
         let plugin_id = new_plugin_id();
         let kernel = Arc::new(Kernel::new(context, plugin_id));
@@ -120,6 +121,18 @@ impl<ID: PluginIdentifier> Plugin<ID> {
             .collect();
         let mut instances = BTreeMap::new();
         for (name, module) in instance.modules.iter() {
+            #[cfg(feature = "wasix")]
+            Self::instantiate_module(
+                context,
+                name,
+                module,
+                &mut instances,
+                &instance.modules,
+                &external_imports,
+                &[],
+                &mut wasix,
+            )?;
+            #[cfg(not(feature = "wasix"))]
             Self::instantiate_module(
                 context,
                 name,
@@ -181,6 +194,7 @@ impl<ID: PluginIdentifier> Plugin<ID> {
         all_modules: &BTreeMap<String, Module>,
         external_imports: &BTreeMap<(String, String), Extern>,
         dependency_tree: &[&str],
+        #[cfg(feature = "wasix")] wasix: &mut Option<&mut wasmer_wasix::WasiFunctionEnv>,
     ) -> Result<(), PluginInstantiationError> {
         if loaded.contains_key(name) {
             return Ok(());
@@ -189,6 +203,14 @@ impl<ID: PluginIdentifier> Plugin<ID> {
             return Err(PluginInstantiationError::CyclicDependency);
         }
 
+        #[cfg(feature = "wasix")]
+        let mut imports = if let Some(wasix) = &wasix {
+            let mut store = context.store.write().unwrap();
+            wasix.import_object(&mut store, module)?
+        } else {
+            Imports::new()
+        };
+        #[cfg(not(feature = "wasix"))]
         let mut imports = Imports::new();
 
         for import in module.imports() {
@@ -235,6 +257,8 @@ impl<ID: PluginIdentifier> Plugin<ID> {
                             all_modules,
                             external_imports,
                             &tree,
+                            #[cfg(feature = "wasix")]
+                            wasix,
                         )?;
                     } else {
                         return Err(PluginInstantiationError::Export(ExportError::Missing(
@@ -263,6 +287,11 @@ impl<ID: PluginIdentifier> Plugin<ID> {
 
         let mut store = context.store.write().unwrap();
         let instance = Instance::new(&mut store, module, &imports)?;
+
+        #[cfg(feature = "wasix")]
+        if let Some(wasix) = wasix {
+            wasix.initialize(&mut store, instance.clone())?;
+        }
 
         loaded.insert(name.to_owned(), instance);
 
@@ -664,6 +693,9 @@ pub enum PluginInstantiationError {
     IncompatibleType(String, String),
     #[error("Memory: {0}")]
     Memory(#[from] wasmer::MemoryError),
+    #[cfg(feature = "wasix")]
+    #[error("WASI: {0}")]
+    Wasix(#[from] wasmer_wasix::WasiError),
 }
 
 #[derive(Clone)]

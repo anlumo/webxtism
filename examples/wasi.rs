@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use extism_convert::{FromBytes, Json};
 use tracing::level_filters::LevelFilter;
-use webxtism::{InMemoryVars, Plugin};
+use wasmer_wasix::WasiEnv;
+use webxtism::{Context, InMemoryVars, Plugin};
 
 #[allow(unused)]
 #[derive(serde::Deserialize, FromBytes, Debug)]
@@ -29,7 +30,10 @@ async fn main() {
             .await
             .unwrap();
 
-    let context = Arc::default();
+    let context = Arc::new(Context::default());
+    let mut wasi_env = WasiEnv::builder("count_vowels")
+        .finalize(&mut context.store())
+        .unwrap();
 
     let plugin = Plugin::new(
         &context,
@@ -37,8 +41,7 @@ async fn main() {
         count_vowels_plugin.as_ref(),
         [],
         InMemoryVars::default(),
-        #[cfg(feature = "wasix")]
-        None,
+        Some(&mut wasi_env),
     )
     .await
     .unwrap();
