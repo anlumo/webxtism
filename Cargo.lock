@@ -4066,6 +4066,7 @@ dependencies = [
  "tracing-subscriber",
  "typed-builder",
  "wasmer",
+ "wasmer-types",
  "wasmer-wasix",
 ]
 
