@@ -86,6 +86,14 @@ impl<ID: PluginIdentifier> Plugin<ID> {
                     vars: Arc::new(vars),
                 }),
             ),
+            WasmInput::Module(module) => (
+                BTreeMap::from([(DEFAULT_MODULE_NAME.to_owned(), module)]),
+                Arc::new(PluginMetadata {
+                    id,
+                    config: Default::default(),
+                    vars: Arc::new(vars),
+                }),
+            ),
         };
         #[cfg(target_arch = "wasm32")]
         let instance = Arc::new(Self {

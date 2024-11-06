@@ -3,10 +3,12 @@ use std::borrow::Cow;
 use std::path::Path;
 
 use extism_manifest::Manifest;
+use wasmer::Module;
 
 pub enum WasmInput<'a> {
     Data(Cow<'a, [u8]>),
     Manifest(Cow<'a, Manifest>),
+    Module(Module),
 }
 
 impl WasmInput<'_> {
