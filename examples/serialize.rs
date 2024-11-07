@@ -49,17 +49,21 @@ async fn main() {
 
     println!("Serialized plugin size: {:?} bytes.", data.len());
 
-    let plugin = Plugin::deserialize(
-        &context,
-        "count_vowels",
-        &mut serde_cbor::Deserializer::from_slice(&data),
-        [],
-        InMemoryVars::default(),
-        #[cfg(feature = "wasix")]
-        None,
-    )
-    .await
-    .unwrap();
+    // SAFETY: We know the plugin is valid and the bytes are in the correct format, because
+    // we just generated them with the same engine.
+    let plugin = unsafe {
+        Plugin::deserialize(
+            &context,
+            "count_vowels",
+            &mut serde_cbor::Deserializer::from_slice(&data),
+            [],
+            InMemoryVars::default(),
+            #[cfg(feature = "wasix")]
+            None,
+        )
+        .await
+        .unwrap()
+    };
 
     let result: Json<TestOutput> = plugin
         .call_in_out(context.store(), "count_vowels", "hello woorld".to_owned())
