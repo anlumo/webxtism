@@ -11,7 +11,7 @@ trait ToExtern<ID: PluginIdentifier> {
 }
 
 #[allow(clippy::type_complexity)]
-pub enum ExportDefinition<IN, OUT, ENV> {
+pub enum ExportDefinition<IN, OUT, ENV: Send> {
     InOut {
         function:
             Box<dyn Fn(&mut StoreMut<'_>, &ENV, IN) -> Result<OUT, ()> + Send + Sync + 'static>,
@@ -254,7 +254,7 @@ impl HostExportBuilder {
 pub struct HostExportBuilderWithFunction<ID> {
     pub(crate) name: String,
     pub(crate) namespace: Option<String>,
-    definition: Box<dyn ToExtern<ID>>,
+    definition: Box<dyn ToExtern<ID> + Send>,
 }
 
 impl<ID: PluginIdentifier> HostExportBuilderWithFunction<ID> {
