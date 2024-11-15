@@ -228,6 +228,10 @@ impl<ID: PluginIdentifier> Plugin<ID> {
         &self.kernel
     }
 
+    pub fn id(&self) -> &ID {
+        &self.metadata.id
+    }
+
     // WARNING: On wasm32, this only works on the thread that created this plugin.
     fn with_instances<R>(
         &self,
