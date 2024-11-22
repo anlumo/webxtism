@@ -914,9 +914,9 @@ dependencies = [
 
 [[package]]
 name = "extism-convert"
-version = "1.8.0"
+version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96b6253fe1e378abdd0fd9fd01b53aa8757c6827cd3c48794b417e542d088d0e"
+checksum = "70a62907d60afa3fc0dfc273833fcb5bb68771f771ce137da1dab7916d856ce9"
 dependencies = [
  "anyhow",
  "base64",
@@ -930,9 +930,9 @@ dependencies = [
 
 [[package]]
 name = "extism-convert-macros"
-version = "1.8.0"
+version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7022773c485da2122413c2edbf50b7dee135b6577cc5ac42dccc307e347ac5d6"
+checksum = "8cd75ee443312a8cd7a402e29fb369c1a2b72f532fd7cdaf34f3023e5d8963d5"
 dependencies = [
  "manyhow",
  "proc-macro-crate 3.2.0",
@@ -943,9 +943,9 @@ dependencies = [
 
 [[package]]
 name = "extism-manifest"
-version = "1.8.0"
+version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cca9129d54add3090148a17444879256b4ec3fd7c4269d2780cd70050232edda"
+checksum = "8203adde7bb7a632122e387564314c804793773e9a701fd8cbb6b2c5940a6640"
 dependencies = [
  "base64",
  "serde",
@@ -2759,9 +2759,9 @@ dependencies = [
 
 [[package]]
 name = "serde"
-version = "1.0.214"
+version = "1.0.215"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f55c3193aca71c12ad7890f1785d2b73e1b9f63a0bbc353c08ef26fe03fc56b5"
+checksum = "6513c1ad0b11a9376da888e3e0baa0077f1aed55c17f50e7b2397136129fb88f"
 dependencies = [
  "serde_derive",
 ]
@@ -2789,9 +2789,9 @@ dependencies = [
 
 [[package]]
 name = "serde_derive"
-version = "1.0.214"
+version = "1.0.215"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de523f781f095e28fa605cdce0f8307e451cc0fd14e2eb4cd2e98a355b147766"
+checksum = "ad1e866f866923f252f05c889987993144fb74e722403468a4ebd70c3cd756c0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3118,11 +3118,11 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "2.0.0"
+version = "2.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15291287e9bff1bc6f9ff3409ed9af665bec7a5fc8ac079ea96be07bca0e2668"
+checksum = "c006c85c7651b3cf2ada4584faa36773bd07bac24acfb39f3c431b36d7e667aa"
 dependencies = [
- "thiserror-impl 2.0.0",
+ "thiserror-impl 2.0.3",
 ]
 
 [[package]]
@@ -3138,9 +3138,9 @@ dependencies = [
 
 [[package]]
 name = "thiserror-impl"
-version = "2.0.0"
+version = "2.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22efd00f33f93fa62848a7cab956c3d38c8d43095efda1decfc2b3a5dc0b8972"
+checksum = "f077553d607adc1caf65430528a576c757a71ed73944b66ebb58ef2bbd243568"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4241,7 +4241,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_cbor",
- "thiserror 2.0.0",
+ "thiserror 2.0.3",
  "tokio",
  "tracing",
  "tracing-subscriber",
