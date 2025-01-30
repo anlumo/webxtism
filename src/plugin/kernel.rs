@@ -358,10 +358,10 @@ impl Kernel {
         let ((plugin, metadata), store) = env.data_and_store_mut();
         plugin.log(store, tracing::Level::TRACE, &metadata.id, text);
     }
-    pub(super) fn get_log_level() -> i64 {
+    pub(super) fn get_log_level() -> i32 {
         let level = tracing::level_filters::LevelFilter::current();
         if level == tracing::level_filters::LevelFilter::OFF {
-            i64::MAX
+            i32::MAX
         } else {
             log_level_to_int(level.into_level().unwrap_or(tracing::Level::ERROR))
         }
@@ -591,7 +591,7 @@ pub enum KernelError {
 }
 
 /// Convert log level to integer
-const fn log_level_to_int(level: tracing::Level) -> i64 {
+const fn log_level_to_int(level: tracing::Level) -> i32 {
     match level {
         tracing::Level::TRACE => 0,
         tracing::Level::DEBUG => 1,
