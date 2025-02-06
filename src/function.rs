@@ -1,3 +1,4 @@
+#![allow(clippy::type_complexity)]
 use std::sync::{Arc, Weak};
 
 use extism_convert::{FromBytesOwned, ToBytes};
@@ -10,23 +11,29 @@ trait ToExtern<ID: PluginIdentifier> {
     fn to_extern(self: Box<Self>, context: &Arc<Context>, plugin: &Arc<Plugin<ID>>) -> Extern;
 }
 
+pub type InOutFunctionBox<IN, OUT, ENV> =
+    Box<dyn Fn(&mut StoreMut<'_>, &ENV, IN) -> Result<OUT, ()> + Send + Sync + 'static>;
+pub type InFunctionBox<IN, ENV> = Box<dyn Fn(&mut StoreMut<'_>, &ENV, IN) + Send + Sync + 'static>;
+pub type OutFunctionBox<OUT, ENV> =
+    Box<dyn Fn(&mut StoreMut<'_>, &ENV) -> Result<OUT, ()> + Send + Sync + 'static>;
+pub type BareFunctionBox<ENV> = Box<dyn Fn(&mut StoreMut<'_>, &ENV) + Send + Sync + 'static>;
+
 #[allow(clippy::type_complexity)]
 pub enum ExportDefinition<IN, OUT, ENV: Send> {
     InOut {
-        function:
-            Box<dyn Fn(&mut StoreMut<'_>, &ENV, IN) -> Result<OUT, ()> + Send + Sync + 'static>,
+        function: InOutFunctionBox<IN, OUT, ENV>,
         env: ENV,
     },
     In {
-        function: Box<dyn Fn(&mut StoreMut<'_>, &ENV, IN) + Send + Sync + 'static>,
+        function: InFunctionBox<IN, ENV>,
         env: ENV,
     },
     Out {
-        function: Box<dyn Fn(&mut StoreMut<'_>, &ENV) -> Result<OUT, ()> + Send + Sync + 'static>,
+        function: OutFunctionBox<OUT, ENV>,
         env: ENV,
     },
     Bare {
-        function: Box<dyn Fn(&mut StoreMut<'_>, &ENV) + Send + Sync + 'static>,
+        function: BareFunctionBox<ENV>,
         env: ENV,
     },
 }
@@ -64,12 +71,18 @@ where
         match *self {
             ExportDefinition::InOut { function, env } => {
                 let mut store = context.store.write().unwrap();
-                let function_env = FunctionEnv::new(&mut store, (Arc::downgrade(plugin), env));
+                let function_env =
+                    FunctionEnv::new(&mut store, (Arc::downgrade(plugin), env, function));
                 Extern::Function(Function::new_typed_with_env(
                     &mut store,
                     &function_env,
-                    move |mut fenv: FunctionEnvMut<'_, (Weak<Plugin<ID>>, ENV)>, input: i64| {
-                        let ((plugin, env), mut store) = fenv.data_and_store_mut();
+                    |mut fenv: FunctionEnvMut<(
+                        Weak<Plugin<ID>>,
+                        ENV,
+                        InOutFunctionBox<IN, OUT, ENV>,
+                    )>,
+                     input: i64| {
+                        let ((plugin, env, function), mut store) = fenv.data_and_store_mut();
                         if let Some(plugin) = plugin.upgrade() {
                             let input = match fetch_in(&mut store, &plugin, input) {
                                 Ok(input) => input,
@@ -95,12 +108,14 @@ where
             }
             ExportDefinition::In { function, env } => {
                 let mut store = context.store.write().unwrap();
-                let function_env = FunctionEnv::new(&mut store, (Arc::downgrade(plugin), env));
+                let function_env =
+                    FunctionEnv::new(&mut store, (Arc::downgrade(plugin), env, function));
                 Extern::Function(Function::new_typed_with_env(
                     &mut store,
                     &function_env,
-                    move |mut fenv: FunctionEnvMut<'_, (Weak<Plugin<ID>>, ENV)>, input: i64| {
-                        let ((plugin, env), mut store) = fenv.data_and_store_mut();
+                    |mut fenv: FunctionEnvMut<(Weak<Plugin<ID>>, ENV, InFunctionBox<IN, ENV>)>,
+                     input: i64| {
+                        let ((plugin, env, function), mut store) = fenv.data_and_store_mut();
                         if let Some(plugin) = plugin.upgrade() {
                             let input = match fetch_in(&mut store, &plugin, input) {
                                 Ok(input) => input,
@@ -116,12 +131,17 @@ where
             }
             ExportDefinition::Out { function, env } => {
                 let mut store = context.store.write().unwrap();
-                let function_env = FunctionEnv::new(&mut store, (Arc::downgrade(plugin), env));
+                let function_env =
+                    FunctionEnv::new(&mut store, (Arc::downgrade(plugin), env, function));
                 Extern::Function(Function::new_typed_with_env(
                     &mut store,
                     &function_env,
-                    move |mut fenv: FunctionEnvMut<'_, (Weak<Plugin<ID>>, ENV)>| {
-                        let ((plugin, env), mut store) = fenv.data_and_store_mut();
+                    |mut fenv: FunctionEnvMut<(
+                        Weak<Plugin<ID>>,
+                        ENV,
+                        OutFunctionBox<OUT, ENV>,
+                    )>| {
+                        let ((plugin, env, function), mut store) = fenv.data_and_store_mut();
                         if let Some(plugin) = plugin.upgrade() {
                             let Ok(output) = function(&mut store, env) else {
                                 tracing::warn!("Host function error");
@@ -139,12 +159,12 @@ where
             }
             ExportDefinition::Bare { function, env } => {
                 let mut store = context.store.write().unwrap();
-                let function_env = FunctionEnv::new(&mut store, env);
+                let function_env = FunctionEnv::new(&mut store, (env, function));
                 Extern::Function(Function::new_typed_with_env(
                     &mut store,
                     &function_env,
-                    move |mut fenv: FunctionEnvMut<'_, ENV>| {
-                        let (env, mut store) = fenv.data_and_store_mut();
+                    |mut fenv: FunctionEnvMut<(ENV, BareFunctionBox<ENV>)>| {
+                        let ((env, function), mut store) = fenv.data_and_store_mut();
                         function(&mut store, env);
                     },
                 ))
