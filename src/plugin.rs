@@ -272,7 +272,10 @@ impl<ID: PluginIdentifier> Plugin<ID> {
         }
 
         #[cfg(feature = "wasix")]
-        let mut imports = if let Some(wasix) = &wasix {
+        let mut imports = if let Some(wasix) = wasix
+            .as_ref()
+            .filter(|_| wasmer_wasix::is_wasi_module(module))
+        {
             let mut store = context.store.write().unwrap();
             wasix.import_object(&mut store, module)?
         } else {
@@ -357,7 +360,10 @@ impl<ID: PluginIdentifier> Plugin<ID> {
         let instance = Instance::new(&mut store, module, &imports)?;
 
         #[cfg(feature = "wasix")]
-        if let Some(wasix) = wasix {
+        if let Some(wasix) = wasix
+            .as_mut()
+            .filter(|_| wasmer_wasix::is_wasi_module(module))
+        {
             wasix.initialize(&mut store, instance.clone())?;
         }
 
