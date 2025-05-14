@@ -291,6 +291,10 @@ impl<ID: PluginIdentifier> Plugin<ID> {
             {
                 return Err(PluginInstantiationError::NonFunctionKernelAccess);
             }
+            #[cfg(feature = "wasix")]
+            if wasix.is_some() && dependency_name.starts_with("wasi_") {
+                continue;
+            }
             if let Some(memory_type) = import.ty().memory() {
                 if dependency_name == "env" {
                     // TODO: check for some limits there
